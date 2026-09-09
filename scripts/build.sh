@@ -3,7 +3,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="$ROOT/src"
 DIST="$ROOT/dist"
-VERSION="${VERSION:-0.3.0}"
+VERSION="${VERSION:-$(tr -d '[:space:]' < "$ROOT/VERSION")}" 
+test -n "$VERSION"
 mkdir -p "$DIST"
 cd "$SRC"
 go test ./...
