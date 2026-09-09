@@ -36,33 +36,38 @@ jobs:
         run: node --check ui.js
 
       - name: Build linux/amd64 plugin
-        env:
-          VERSION: 0.3.0
         run: bash ./scripts/build.sh
 
       - name: ABI smoke
-        working-directory: src
-        run: python3 abi_smoke.py ../dist/key-chain-router-v0.3.0.so
+        shell: bash
+        run: |
+          VERSION="$(tr -d '[:space:]' < VERSION)"
+          cd src
+          python3 abi_smoke.py "../dist/key-chain-router-v${VERSION}.so"
 
       - name: Binary inspection
+        shell: bash
         run: |
-          file dist/key-chain-router-v0.3.0.so
-          nm -D dist/key-chain-router-v0.3.0.so | grep -E 'cliproxy_plugin_init|keyChainRouterPluginCall|keyChainRouterPluginFree|keyChainRouterPluginShutdown'
-          ldd dist/key-chain-router-v0.3.0.so
+          VERSION="$(tr -d '[:space:]' < VERSION)"
+          file "dist/key-chain-router-v${VERSION}.so"
+          nm -D "dist/key-chain-router-v${VERSION}.so" | grep -E 'cliproxy_plugin_init|keyChainRouterPluginCall|keyChainRouterPluginFree|keyChainRouterPluginShutdown'
+          ldd "dist/key-chain-router-v${VERSION}.so"
 
       - name: Package artifact
+        shell: bash
         run: |
+          VERSION="$(tr -d '[:space:]' < VERSION)"
           mkdir -p package
-          cp dist/key-chain-router-v0.3.0.so package/
+          cp "dist/key-chain-router-v${VERSION}.so" package/
           cp dist/key-chain-router.so package/
           cp README.md TESTING.md config.example.yaml package/
-          (cd package && sha256sum key-chain-router-v0.3.0.so key-chain-router.so > SHA256SUMS)
-          tar -C package -czf key-chain-router-v0.3.0-linux-amd64.tar.gz .
+          (cd package && sha256sum "key-chain-router-v${VERSION}.so" key-chain-router.so > SHA256SUMS)
+          tar -C package -czf "key-chain-router-v${VERSION}-linux-amd64.tar.gz" .
 
       - uses: actions/upload-artifact@v4
         with:
           name: key-chain-router-linux-amd64
           path: |
             package/
-            key-chain-router-v0.3.0-linux-amd64.tar.gz
+            key-chain-router-v*-linux-amd64.tar.gz
           if-no-files-found: error
