@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-build:
+    runs-on: ubuntu-latest
+    container:
+      image: golang:1.26-bookworm
+    steps:
+      - name: Install tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git build-essential python3 nodejs ca-certificates file binutils
+          rm -rf /var/lib/apt/lists/*
+
+      - uses: actions/checkout@v4
+
+      - name: Materialize source
+        run: ./scripts/materialize-source.sh
+
+      - name: Go test
+        working-directory: src
+        run: go test ./...
+
+      - name: Go vet
+        working-directory: src
+        run: go vet ./...
+
+      - name: JavaScript syntax check
+        working-directory: src
+        run: node --check ui.js
+
+      - name: Build linux/amd64 plugin
+        env:
+          VERSION: 0.3.0
+        run: ./scripts/build.sh
+
+      - name: ABI smoke
+        working-directory: src
+        run: python3 abi_smoke.py ../dist/key-chain-router-v0.3.0.so
+
+      - name: Binary inspection
+        run: |
+          file dist/key-chain-router-v0.3.0.so
+          nm -D dist/key-chain-router-v0.3.0.so | grep -E 'cliproxy_plugin_init|keyChainRouterPluginCall|keyChainRouterPluginFree|keyChainRouterPluginShutdown'
+          ldd dist/key-chain-router-v0.3.0.so
+
+      - name: Package artifact
+        run: |
+          mkdir -p package
+          cp dist/key-chain-router-v0.3.0.so package/
+          cp dist/key-chain-router.so package/
+          cp README.md TESTING.md config.example.yaml package/
+          (cd package && sha256sum key-chain-router-v0.3.0.so key-chain-router.so > SHA256SUMS)
+          tar -C package -czf key-chain-router-v0.3.0-linux-amd64.tar.gz .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: key-chain-router-linux-amd64
+          path: |
+            package/
+            key-chain-router-v0.3.0-linux-amd64.tar.gz
+          if-no-files-found: error
