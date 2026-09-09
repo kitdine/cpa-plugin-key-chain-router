@@ -24,7 +24,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Materialize source
-        run: ./scripts/materialize-source.sh
+        run: bash ./scripts/materialize-source.sh
 
       - name: Go test
         working-directory: src
@@ -41,7 +41,7 @@ jobs:
       - name: Build linux/amd64 plugin
         env:
           VERSION: 0.3.0
-        run: ./scripts/build.sh
+        run: bash ./scripts/build.sh
 
       - name: ABI smoke
         working-directory: src
