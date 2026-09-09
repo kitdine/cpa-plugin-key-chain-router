@@ -1,8 +1,11 @@
 # build artifacts
-dist/*.so
-dist/*.h
+dist/
+*.so
+*.h
 *.tar.gz
+*.zip
 SHA256SUMS
+checksums.txt
 
 # local plugin state
 key-chain-router-state.json
@@ -12,8 +15,3 @@ key-chain-router-state.json
 .DS_Store
 .idea/
 .vscode/
-
-# generated from src/parts
-src/main.go
-src/page.html
-src/ui.js
