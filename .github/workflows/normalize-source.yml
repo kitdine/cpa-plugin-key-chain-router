@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   normalize:
-    if: github.event.head_commit.message == 'chore: normalize source tree'
+    if: ${{ contains(github.event.head_commit.message, 'normalize source tree') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -42,7 +42,7 @@ jobs:
           Path('src/ui.js').write_text(js)
           page.write_text(html[:start] + '<script>{{KEY_CHAIN_ROUTER_UI}}</script>' + html[end + len('</script>'):])
 
-          Path('.gitignore').write_text('''# build artifacts\ndist/\n*.so\n*.h\n*.tar.gz\n*.zip\nSHA256SUMS\nchecksums.txt\n\n# local plugin state\nkey-chain-router-state.json\n*.tmp\n\n# editor / OS\n.DS_Store\n.idea/\n.vscode/\n''')
+          Path('.gitignore').write_text('# build artifacts\ndist/\n*.so\n*.h\n*.tar.gz\n*.zip\nSHA256SUMS\nchecksums.txt\n\n# local plugin state\nkey-chain-router-state.json\n*.tmp\n\n# editor / OS\n.DS_Store\n.idea/\n.vscode/\n')
           PY
 
           git rm -r src/parts scripts/materialize-source.sh
