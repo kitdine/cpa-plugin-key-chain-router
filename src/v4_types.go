@@ -95,26 +95,26 @@ type ObservabilityConfig struct {
 }
 
 type RoutingEvent struct {
-	TraceID         string          `json:"trace_id"`
-	At              string          `json:"at"`
-	Decision        string          `json:"decision"`
-	Reason          string          `json:"reason,omitempty"`
-	PolicyName      string          `json:"policy_name,omitempty"`
-	KeyFingerprint  string          `json:"key_fingerprint,omitempty"`
-	KeyHint         string          `json:"key_hint,omitempty"`
-	RuleID          string          `json:"rule_id,omitempty"`
-	RuleName        string          `json:"rule_name,omitempty"`
-	Strategy        string          `json:"strategy,omitempty"`
-	Model           string          `json:"model,omitempty"`
-	Stream          bool            `json:"stream"`
-	Attempts        []attemptResult `json:"attempts,omitempty"`
-	Final           string          `json:"final,omitempty"`
-	Provider        string          `json:"provider,omitempty"`
-	AuthIndex       string          `json:"auth_index,omitempty"`
-	Status          int             `json:"status,omitempty"`
-	DurationMs      int64           `json:"duration_ms,omitempty"`
-	Success         bool            `json:"success"`
-	Error           string          `json:"error,omitempty"`
+	TraceID        string          `json:"trace_id"`
+	At             string          `json:"at"`
+	Decision       string          `json:"decision"`
+	Reason         string          `json:"reason,omitempty"`
+	PolicyName     string          `json:"policy_name,omitempty"`
+	KeyFingerprint string          `json:"key_fingerprint,omitempty"`
+	KeyHint        string          `json:"key_hint,omitempty"`
+	RuleID         string          `json:"rule_id,omitempty"`
+	RuleName       string          `json:"rule_name,omitempty"`
+	Strategy       string          `json:"strategy,omitempty"`
+	Model          string          `json:"model,omitempty"`
+	Stream         bool            `json:"stream"`
+	Attempts       []attemptResult `json:"attempts,omitempty"`
+	Final          string          `json:"final,omitempty"`
+	Provider       string          `json:"provider,omitempty"`
+	AuthIndex      string          `json:"auth_index,omitempty"`
+	Status         int             `json:"status,omitempty"`
+	DurationMs     int64           `json:"duration_ms,omitempty"`
+	Success        bool            `json:"success"`
+	Error          string          `json:"error,omitempty"`
 }
 
 type sqliteSink struct {

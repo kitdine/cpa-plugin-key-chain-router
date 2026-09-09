@@ -69,7 +69,7 @@ import (
 	"unsafe"
 )
 
-var pluginVersion = "0.3.0"
+var pluginVersion = "0.4.0"
 
 const (
 	pluginID   = "key-chain-router"
@@ -320,7 +320,7 @@ func keyChainRouterPluginFree(ptr unsafe.Pointer, _ C.size_t) {
 }
 
 //export keyChainRouterPluginShutdown
-func keyChainRouterPluginShutdown() {}
+func keyChainRouterPluginShutdown() { shutdownObservabilityV4() }
 
 func handleMethod(method string, raw []byte) ([]byte, error) {
 	switch method {
@@ -330,20 +330,20 @@ func handleMethod(method string, raw []byte) ([]byte, error) {
 		}
 		return okEnvelope(pluginRegistration())
 	case methodModelRoute:
-		return handleModelRoute(raw)
+		return handleModelRouteV4(raw)
 	case methodSchedulerPick:
 		return handleSchedulerPick(raw)
 	case methodExecutorIdentifier:
 		return okEnvelope(map[string]any{"identifier": pluginID})
 	case methodExecutorExecute:
-		return handleExecute(raw, false)
+		return handleExecuteV4(raw, false)
 	case methodExecutorExecuteStream:
-		return handleExecute(raw, true)
+		return handleExecuteV4(raw, true)
 	case methodExecutorCountTokens:
 		return okEnvelope(map[string]any{"Payload": []byte(`{"input_tokens":0}`)})
 	case methodManagementRegister:
 		return okEnvelope(managementRegistration{Resources: []managementResource{
-			{Path: "/status", Menu: "Key Chain Router", Description: "按 CPA 原生 API Key 配置有序上游故障切换链"},
+			{Path: "/status", Menu: "Key Chain Router", Description: "按 CPA 原生 API Key 和模型规则执行可观测策略路由"},
 			{Path: "/api", Description: "Key Chain Router 管理数据接口"},
 		}})
 	case methodManagementHandle:
@@ -387,6 +387,9 @@ func configure(raw []byte) error {
 	runtimeState.statePath = statePath
 	runtimeState.state = st
 	runtimeState.Unlock()
+	if err := configureV4(statePath, st); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -1058,7 +1061,7 @@ func handleManagement(raw []byte) ([]byte, error) {
 		return okEnvelope(htmlResponse(200, []byte(renderHTML())))
 	}
 	if strings.HasSuffix(req.Path, "/api") {
-		resp, err := handleAPI(req)
+		resp, err := handleAPIV4(req)
 		if err != nil {
 			return okEnvelope(jsonResponse(400, map[string]any{"ok": false, "error": err.Error()}))
 		}
