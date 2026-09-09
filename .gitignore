@@ -1,0 +1,19 @@
+# build artifacts
+dist/*.so
+dist/*.h
+*.tar.gz
+SHA256SUMS
+
+# local plugin state
+key-chain-router-state.json
+*.tmp
+
+# editor / OS
+.DS_Store
+.idea/
+.vscode/
+
+# generated from src/parts
+src/main.go
+src/page.html
+src/ui.js
