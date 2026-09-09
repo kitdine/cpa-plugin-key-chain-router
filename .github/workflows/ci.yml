@@ -18,13 +18,10 @@ jobs:
       - name: Install tools
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends git build-essential python3 nodejs ca-certificates file binutils
+          apt-get install -y --no-install-recommends git build-essential python3 nodejs ca-certificates file binutils zip
           rm -rf /var/lib/apt/lists/*
 
       - uses: actions/checkout@v4
-
-      - name: Materialize source
-        run: bash ./scripts/materialize-source.sh
 
       - name: Go test
         working-directory: src
