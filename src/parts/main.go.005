@@ -1,0 +1,300 @@
+}
+func parseTopMapList(lines []yamlLine, section string) []yamlMapEntry {
+	start, end := sectionBounds(lines, section)
+	if start < 0 {
+		return nil
+	}
+	block := lines[start:end]
+	return parseMapListAt(block, 2)
+}
+func parseMapListAt(lines []yamlLine, indent int) []yamlMapEntry {
+	out := []yamlMapEntry{}
+	for i := 0; i < len(lines); {
+		l := lines[i]
+		if l.Indent != indent || !strings.HasPrefix(l.Text, "-") {
+			i++
+			continue
+		}
+		e := yamlMapEntry{Fields: map[string]string{}, Nested: map[string][]yamlMapEntry{}}
+		rest := strings.TrimSpace(strings.TrimPrefix(l.Text, "-"))
+		if k, v, ok := splitYAMLKeyValue(rest); ok {
+			e.Fields[k] = v
+		}
+		i++
+		for i < len(lines) && lines[i].Indent > indent {
+			cur := lines[i]
+			if cur.Indent == indent+2 {
+				if k, v, ok := splitYAMLKeyValue(cur.Text); ok {
+					if strings.TrimSpace(v) == "" {
+						j := i + 1
+						for j < len(lines) && lines[j].Indent > cur.Indent {
+							j++
+						}
+						e.Nested[k] = parseMapListAt(lines[i+1:j], cur.Indent+2)
+						i = j
+						continue
+					} else {
+						e.Fields[k] = v
+					}
+				}
+			}
+			i++
+		}
+		out = append(out, e)
+	}
+	return out
+}
+func modelsFromNested(entries []yamlMapEntry) []string {
+	out := []string{}
+	for _, e := range entries {
+		a := scalar(e.Fields["alias"])
+		n := scalar(e.Fields["name"])
+		if a != "" {
+			out = append(out, a)
+		} else if n != "" {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+func stripYAMLComment(s string) string {
+	sq, dq := false, false
+	for i, r := range s {
+		switch r {
+		case '\'':
+			if !dq {
+				sq = !sq
+			}
+		case '"':
+			if !sq {
+				dq = !dq
+			}
+		case '#':
+			if !sq && !dq {
+				return strings.TrimRight(s[:i], " ")
+			}
+		}
+	}
+	return s
+}
+func splitYAMLKeyValue(s string) (string, string, bool) {
+	if s == "" {
+		return "", "", false
+	}
+	sq, dq := false, false
+	for i, r := range s {
+		switch r {
+		case '\'':
+			if !dq {
+				sq = !sq
+			}
+		case '"':
+			if !sq {
+				dq = !dq
+			}
+		case ':':
+			if !sq && !dq {
+				return strings.TrimSpace(s[:i]), strings.TrimSpace(s[i+1:]), true
+			}
+		}
+	}
+	return "", "", false
+}
+func unquoteYAML(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) >= 2 && ((s[0] == '"' && s[len(s)-1] == '"') || (s[0] == '\'' && s[len(s)-1] == '\'')) {
+		if s[0] == '"' {
+			if q, e := strconv.Unquote(s); e == nil {
+				return q
+			}
+		}
+		return s[1 : len(s)-1]
+	}
+	return s
+}
+func scalar(s string) string { return unquoteYAML(s) }
+func parseBool(s string, def bool) bool {
+	switch strings.ToLower(unquoteYAML(strings.TrimSpace(s))) {
+	case "true", "yes", "on", "1":
+		return true
+	case "false", "no", "off", "0":
+		return false
+	}
+	return def
+}
+func parseStringList(s string) []string {
+	s = strings.TrimSpace(s)
+	if strings.HasPrefix(s, "[") && strings.HasSuffix(s, "]") {
+		s = s[1 : len(s)-1]
+	}
+	parts := strings.Split(s, ",")
+	out := []string{}
+	for _, p := range parts {
+		if v := unquoteYAML(p); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+func parseIntList(s string) []int {
+	out := []int{}
+	for _, p := range parseStringList(s) {
+		if n, e := strconv.Atoi(strings.TrimSpace(p)); e == nil {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+func toIntSet(xs []int) map[int]bool {
+	m := map[int]bool{}
+	for _, x := range xs {
+		m[x] = true
+	}
+	return m
+}
+
+func extractDownstreamKey(h http.Header) string {
+	auth := strings.TrimSpace(h.Get("Authorization"))
+	if strings.HasPrefix(strings.ToLower(auth), "bearer ") {
+		return strings.TrimSpace(auth[7:])
+	}
+	for _, k := range []string{"X-API-Key", "Api-Key", "API-Key"} {
+		if v := strings.TrimSpace(h.Get(k)); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+func fingerprint(s string) string { h := sha256.Sum256([]byte(s)); return hex.EncodeToString(h[:]) }
+func maskKey(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	if len(s) <= 8 {
+		return s[:1] + "…" + s[len(s)-1:]
+	}
+	return s[:4] + "…" + s[len(s)-4:]
+}
+func secureEqual(a, b string) bool {
+	return strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(b))
+}
+func randomShort() string { b := make([]byte, 5); _, _ = rand.Read(b); return hex.EncodeToString(b) }
+func firstEnabledCandidate(r *Route) *Candidate {
+	for _, c := range r.Candidates {
+		if c != nil && c.Enabled {
+			return c
+		}
+	}
+	return nil
+}
+func enabledCandidates(r *Route) []*Candidate {
+	out := []*Candidate{}
+	for _, c := range r.Candidates {
+		if c != nil && c.Enabled {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+func callHost(method string, payload any) (json.RawMessage, error) {
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	cm := C.CString(method)
+	defer C.free(unsafe.Pointer(cm))
+	var resp C.cliproxy_buffer
+	var ptr *C.uint8_t
+	if len(raw) > 0 {
+		p := C.CBytes(raw)
+		if p == nil {
+			return nil, errors.New("alloc host payload")
+		}
+		defer C.free(p)
+		ptr = (*C.uint8_t)(p)
+	}
+	code := C.call_host_api(cm, ptr, C.size_t(len(raw)), &resp)
+	var out []byte
+	if resp.ptr != nil && resp.len > 0 {
+		out = C.GoBytes(resp.ptr, C.int(resp.len))
+	}
+	if resp.ptr != nil {
+		C.free_host_buffer(resp.ptr, resp.len)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("host callback %s empty, code=%d", method, int(code))
+	}
+	var env envelope
+	if err := json.Unmarshal(out, &env); err != nil {
+		return nil, fmt.Errorf("decode host envelope: %w", err)
+	}
+	if !env.OK {
+		if env.Error != nil {
+			return nil, fmt.Errorf("%s: %s", env.Error.Code, env.Error.Message)
+		}
+		return nil, fmt.Errorf("host callback %s failed", method)
+	}
+	if code != 0 {
+		return nil, fmt.Errorf("host callback %s code=%d", method, int(code))
+	}
+	return env.Result, nil
+}
+
+func okEnvelope(v any) ([]byte, error) {
+	r, e := json.Marshal(v)
+	if e != nil {
+		return nil, e
+	}
+	return json.Marshal(envelope{OK: true, Result: r})
+}
+func errorEnvelope(code, msg string) []byte {
+	b, _ := json.Marshal(envelope{OK: false, Error: &envelopeError{Code: code, Message: msg}})
+	return b
+}
+func writeResponse(resp *C.cliproxy_buffer, raw []byte) {
+	if resp == nil || len(raw) == 0 {
+		return
+	}
+	p := C.CBytes(raw)
+	if p == nil {
+		return
+	}
+	resp.ptr = p
+	resp.len = C.size_t(len(raw))
+}
+func htmlResponse(code int, body []byte) managementResponse {
+	return managementResponse{StatusCode: code, Headers: http.Header{"Content-Type": []string{"text/html; charset=utf-8"}, "Cache-Control": []string{"no-store"}}, Body: body}
+}
+func jsonResponse(code int, v any) managementResponse {
+	b, _ := json.Marshal(v)
+	return managementResponse{StatusCode: code, Headers: http.Header{"Content-Type": []string{"application/json; charset=utf-8"}, "Cache-Control": []string{"no-store"}}, Body: b}
+}
+func cloneHeader(h http.Header) http.Header {
+	if h == nil {
+		return http.Header{}
+	}
+	return h.Clone()
+}
+func cloneState(st State) State {
+	b, _ := json.Marshal(st)
+	var x State
+	_ = json.Unmarshal(b, &x)
+	if x.Routes == nil {
+		x.Routes = map[string]*Route{}
+	}
+	return x
+}
+func cloneRoute(r *Route) *Route {
+	if r == nil {
+		return nil
+	}
+	b, _ := json.Marshal(r)
+	var x Route
+	_ = json.Unmarshal(b, &x)
+	return &x
+}
+func anyMap(v any) map[string]any {
+	if m, ok := v.(map[string]any); ok {
+		return m
