@@ -1,0 +1,10 @@
+v0.4.0
+
+Policy Router release:
+- one downstream API key = one policy
+- model rules
+- ordered / round-robin / weighted / priority-weighted / sticky / cpa-default
+- error-specific failover
+- explicit KCR vs CPA decisions
+- memory + host.log + optional SQLite observability
+- v0.3 state migration
