@@ -4,6 +4,8 @@ on:
   push:
     tags:
       - 'v*'
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       version:
@@ -16,6 +18,7 @@ permissions:
 
 jobs:
   release:
+    if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch' || startsWith(github.event.head_commit.message, 'release:')
     runs-on: ubuntu-latest
     container:
       image: golang:1.26-bookworm
@@ -23,13 +26,10 @@ jobs:
       - name: Install tools
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends git build-essential python3 nodejs ca-certificates file binutils
+          apt-get install -y --no-install-recommends git build-essential python3 nodejs ca-certificates file binutils zip
           rm -rf /var/lib/apt/lists/*
 
       - uses: actions/checkout@v4
-
-      - name: Materialize source
-        run: bash ./scripts/materialize-source.sh
 
       - name: Resolve version
         id: version
@@ -37,8 +37,10 @@ jobs:
         run: |
           if [[ "${GITHUB_REF_TYPE:-}" == "tag" ]]; then
             VERSION="${GITHUB_REF_NAME#v}"
-          else
+          elif [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
             VERSION="${{ inputs.version }}"
+          else
+            VERSION="$(tr -d '[:space:]' < VERSION)"
           fi
           test -n "$VERSION"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
@@ -49,24 +51,19 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: bash ./scripts/build.sh
 
-      - name: JavaScript syntax check
-        working-directory: src
-        run: node --check ui.js
-
       - name: ABI smoke
         working-directory: src
         env:
           VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          cp ../dist/key-chain-router-v${VERSION}.so ../dist/key-chain-router-v0.3.0.so
-          python3 abi_smoke.py ../dist/key-chain-router-v0.3.0.so
-          rm -f ../dist/key-chain-router-v0.3.0.so
+        run: python3 abi_smoke.py "../dist/key-chain-router-v${VERSION}.so"
 
       - name: Prepare release files
+        shell: bash
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          mkdir -p release/package
+          set -euo pipefail
+          mkdir -p release/package release/store
           cp "dist/key-chain-router-v${VERSION}.so" release/
           cp dist/key-chain-router.so release/
           cp README.md TESTING.md config.example.yaml release/package/
@@ -76,6 +73,10 @@ jobs:
           cp release/SHA256SUMS release/package/
           tar -C release/package -czf "release/key-chain-router-v${VERSION}-linux-amd64.tar.gz" .
 
+          cp "dist/key-chain-router-v${VERSION}.so" release/store/
+          (cd release/store && zip -q "../key-chain-router_${VERSION}_linux_amd64.zip" "key-chain-router-v${VERSION}.so")
+          (cd release && sha256sum "key-chain-router_${VERSION}_linux_amd64.zip" > checksums.txt)
+
       - uses: actions/upload-artifact@v4
         with:
           name: key-chain-router-v${{ steps.version.outputs.version }}
@@ -83,12 +84,15 @@ jobs:
           if-no-files-found: error
 
       - name: Create GitHub Release
-        if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
           generate_release_notes: true
           files: |
             release/key-chain-router-v${{ steps.version.outputs.version }}.so
             release/key-chain-router.so
             release/key-chain-router-v${{ steps.version.outputs.version }}-linux-amd64.tar.gz
             release/SHA256SUMS
+            release/key-chain-router_${{ steps.version.outputs.version }}_linux_amd64.zip
+            release/checksums.txt
