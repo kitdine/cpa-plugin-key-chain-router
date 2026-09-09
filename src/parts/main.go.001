@@ -1,0 +1,300 @@
+	}
+	var req []byte
+	if request != nil && requestLen > 0 {
+		req = C.GoBytes(unsafe.Pointer(request), C.int(requestLen))
+	}
+	raw, err := handleMethod(C.GoString(method), req)
+	if err != nil {
+		writeResponse(response, errorEnvelope("plugin_error", err.Error()))
+		return 1
+	}
+	writeResponse(response, raw)
+	return 0
+}
+
+//export keyChainRouterPluginFree
+func keyChainRouterPluginFree(ptr unsafe.Pointer, _ C.size_t) {
+	if ptr != nil {
+		C.free(ptr)
+	}
+}
+
+//export keyChainRouterPluginShutdown
+func keyChainRouterPluginShutdown() {}
+
+func handleMethod(method string, raw []byte) ([]byte, error) {
+	switch method {
+	case methodPluginRegister, methodPluginReconfigure:
+		if err := configure(raw); err != nil {
+			return nil, err
+		}
+		return okEnvelope(pluginRegistration())
+	case methodModelRoute:
+		return handleModelRoute(raw)
+	case methodSchedulerPick:
+		return handleSchedulerPick(raw)
+	case methodExecutorIdentifier:
+		return okEnvelope(map[string]any{"identifier": pluginID})
+	case methodExecutorExecute:
+		return handleExecute(raw, false)
+	case methodExecutorExecuteStream:
+		return handleExecute(raw, true)
+	case methodExecutorCountTokens:
+		return okEnvelope(map[string]any{"Payload": []byte(`{"input_tokens":0}`)})
+	case methodManagementRegister:
+		return okEnvelope(managementRegistration{Resources: []managementResource{
+			{Path: "/status", Menu: "Key Chain Router", Description: "按 CPA 原生 API Key 配置有序上游故障切换链"},
+			{Path: "/api", Description: "Key Chain Router 管理数据接口"},
+		}})
+	case methodManagementHandle:
+		return handleManagement(raw)
+	default:
+		return errorEnvelope("unknown_method", "unknown method: "+method), nil
+	}
+}
+
+func configure(raw []byte) error {
+	var req lifecycleRequest
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &req); err != nil {
+			return fmt.Errorf("decode lifecycle: %w", err)
+		}
+	}
+	schema := req.SchemaVersion
+	if schema == 0 {
+		schema = 1
+	}
+	if schema > maxSchema {
+		schema = maxSchema
+	}
+	cfg := parsePluginConfig(string(req.ConfigYAML))
+	pluginDir := detectPluginDir()
+	configPath := resolveCPAConfigPath(cfg.CPAConfigFile)
+	statePath := cfg.StateFile
+	if !filepath.IsAbs(statePath) {
+		statePath = filepath.Join(pluginDir, statePath)
+	}
+	st, err := loadState(statePath, cfg)
+	if err != nil {
+		return err
+	}
+
+	runtimeState.Lock()
+	runtimeState.cfg = cfg
+	runtimeState.schema = schema
+	runtimeState.pluginDir = pluginDir
+	runtimeState.configPath = configPath
+	runtimeState.statePath = statePath
+	runtimeState.state = st
+	runtimeState.Unlock()
+	return nil
+}
+
+func pluginRegistration() registration {
+	runtimeState.RLock()
+	schema := runtimeState.schema
+	runtimeState.RUnlock()
+	if schema == 0 {
+		schema = 1
+	}
+	return registration{
+		SchemaVersion: schema,
+		Metadata: map[string]any{
+			"Name":             pluginName,
+			"Version":          pluginVersion,
+			"Author":           "kitdine",
+			"GitHubRepository": "https://github.com/kitdine/cpa-plugin-key-chain-router",
+			"Logo":             "",
+			"ConfigFields":     []any{},
+		},
+		Capabilities: registrationCapability{
+			Scheduler: true, ModelRouter: true, Executor: true, ManagementAPI: true,
+			ExecutorModelScope:    "static",
+			ExecutorInputFormats:  []string{"openai", "openai-response", "claude", "gemini", "interactions"},
+			ExecutorOutputFormats: []string{"openai", "openai-response", "claude", "gemini", "interactions"},
+		},
+	}
+}
+
+func parsePluginConfig(raw string) pluginConfig {
+	cfg := pluginConfig{
+		Enabled:         true,
+		StateFile:       "key-chain-router-state.json",
+		TicketTTL:       30 * time.Second,
+		FallbackEnabled: true,
+		FallbackOn:      map[int]bool{401: true, 403: true, 408: true, 409: true, 429: true, 500: true, 502: true, 503: true, 504: true},
+		NoFallbackOn:    map[int]bool{400: true, 404: true, 422: true},
+	}
+	lines := strings.Split(raw, "\n")
+	for _, ln := range lines {
+		s := strings.TrimSpace(stripYAMLComment(ln))
+		if s == "" {
+			continue
+		}
+		key, val, ok := splitYAMLKeyValue(s)
+		if !ok {
+			continue
+		}
+		switch key {
+		case "enabled":
+			cfg.Enabled = parseBool(val, cfg.Enabled)
+		case "state_file":
+			if v := unquoteYAML(val); v != "" {
+				cfg.StateFile = v
+			}
+		case "cpa_config_file":
+			cfg.CPAConfigFile = unquoteYAML(val)
+		case "ticket_ttl_seconds":
+			if n, e := strconv.Atoi(strings.TrimSpace(val)); e == nil && n > 0 {
+				cfg.TicketTTL = time.Duration(n) * time.Second
+			}
+		case "fallback_on_status":
+			if xs := parseIntList(val); len(xs) > 0 {
+				cfg.FallbackOn = toIntSet(xs)
+			}
+		case "no_fallback_on_status":
+			if xs := parseIntList(val); len(xs) > 0 {
+				cfg.NoFallbackOn = toIntSet(xs)
+			}
+		case "client_models":
+			cfg.LegacyClientModels = parseStringList(val)
+		}
+	}
+	return cfg
+}
+
+func detectPluginDir() string {
+	wd, _ := os.Getwd()
+	candidates := []string{
+		filepath.Join(wd, "plugins", "linux", "amd64"),
+		filepath.Join(wd, "plugins"),
+		"/CLIProxyAPI/plugins/linux/amd64",
+		"/CLIProxyAPI/plugins",
+	}
+	for _, dir := range candidates {
+		if st, err := os.Stat(dir); err == nil && st.IsDir() {
+			ents, _ := os.ReadDir(dir)
+			for _, e := range ents {
+				name := strings.ToLower(e.Name())
+				if !e.IsDir() && strings.HasPrefix(name, "key-chain-router") && strings.HasSuffix(name, ".so") {
+					return dir
+				}
+			}
+		}
+	}
+	return wd
+}
+
+func resolveCPAConfigPath(explicit string) string {
+	candidates := []string{}
+	if strings.TrimSpace(explicit) != "" {
+		candidates = append(candidates, strings.TrimSpace(explicit))
+	}
+	args := os.Args
+	for i := 0; i < len(args); i++ {
+		if args[i] == "-config" || args[i] == "--config" {
+			if i+1 < len(args) {
+				candidates = append(candidates, args[i+1])
+			}
+		}
+		if strings.HasPrefix(args[i], "-config=") {
+			candidates = append(candidates, strings.TrimPrefix(args[i], "-config="))
+		}
+		if strings.HasPrefix(args[i], "--config=") {
+			candidates = append(candidates, strings.TrimPrefix(args[i], "--config="))
+		}
+	}
+	candidates = append(candidates, "config.yaml", "config.yml", "/CLIProxyAPI/config.yaml", "/CLIProxyAPI/config.yml")
+	for _, c := range candidates {
+		if c == "" {
+			continue
+		}
+		if st, err := os.Stat(c); err == nil && !st.IsDir() {
+			if a, e := filepath.Abs(c); e == nil {
+				return a
+			}
+			return c
+		}
+	}
+	return ""
+}
+
+func loadState(path string, cfg pluginConfig) (State, error) {
+	st := State{Version: 3, UpdatedAt: time.Now().UTC().Format(time.RFC3339), Routes: map[string]*Route{}}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return st, nil
+		}
+		return st, fmt.Errorf("read state: %w", err)
+	}
+	if len(bytes.TrimSpace(data)) == 0 {
+		return st, nil
+	}
+	if err := json.Unmarshal(data, &st); err != nil {
+		return st, fmt.Errorf("decode state: %w", err)
+	}
+	if st.Routes == nil {
+		st.Routes = map[string]*Route{}
+	}
+	// v0.1/v0.2 migration: fixed model/code becomes wildcard match and candidate model becomes optional override.
+	for _, r := range st.Routes {
+		if r == nil {
+			continue
+		}
+		if len(r.MatchModels) == 0 {
+			r.MatchModels = []string{"*"}
+		}
+		for _, c := range r.Candidates {
+			if c == nil {
+				continue
+			}
+			if c.OverrideModel == "" && c.Model != "" {
+				c.OverrideModel = c.Model
+			}
+			c.Model = ""
+		}
+	}
+	st.Version = 3
+	return st, nil
+}
+
+func saveState() error {
+	runtimeState.Lock()
+	defer runtimeState.Unlock()
+	runtimeState.state.Version = 3
+	runtimeState.state.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	raw, err := json.MarshalIndent(runtimeState.state, "", "  ")
+	if err != nil {
+		return err
+	}
+	path := runtimeState.statePath
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0600); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmp, 0600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+func handleModelRoute(raw []byte) ([]byte, error) {
+	var req map[string]any
+	if err := json.Unmarshal(raw, &req); err != nil {
+		return nil, err
+	}
+	runtimeState.RLock()
+	cfg := runtimeState.cfg
+	st := cloneState(runtimeState.state)
+	runtimeState.RUnlock()
+	if !cfg.Enabled {
+		return okEnvelope(map[string]any{"Handled": false})
+	}
+	headers := mapToHeader(anyMap(req["Headers"]))
+	key := extractDownstreamKey(headers)
+	if key == "" {
+		return okEnvelope(map[string]any{"Handled": false})
