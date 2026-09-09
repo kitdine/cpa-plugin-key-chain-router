@@ -5,7 +5,6 @@ SRC="$ROOT/src"
 DIST="$ROOT/dist"
 VERSION="${VERSION:-0.3.0}"
 mkdir -p "$DIST"
-bash "$ROOT/scripts/materialize-source.sh"
 cd "$SRC"
 go test ./...
 go vet ./...
