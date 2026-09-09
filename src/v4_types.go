@@ -114,6 +114,7 @@ type RoutingEvent struct {
 	Status          int             `json:"status,omitempty"`
 	DurationMs      int64           `json:"duration_ms,omitempty"`
 	Success         bool            `json:"success"`
+	Error           string          `json:"error,omitempty"`
 }
 
 type sqliteSink struct {
