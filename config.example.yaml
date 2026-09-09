@@ -7,5 +7,6 @@ plugins:
       priority: 100
       state_file: key-chain-router-state.json
       ticket_ttl_seconds: 30
-      fallback_on_status: [401, 403, 408, 409, 429, 500, 502, 503, 504]
-      no_fallback_on_status: [400, 404, 422]
+
+# Policy、模型 Rule、Weight/Priority/Failover 和可观测性均在插件中文管理页配置：
+# /v0/resource/plugins/key-chain-router/status
