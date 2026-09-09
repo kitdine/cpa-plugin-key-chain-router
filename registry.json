@@ -4,13 +4,13 @@
     {
       "id": "key-chain-router",
       "name": "Key Chain Router",
-      "description": "按 CPA 原生下游 API Key 配置独立的有序 OAuth / API Provider failover 链，并保留 CPA 原生 usage 与请求监控。",
+      "description": "按 CPA 原生下游 API Key 建立唯一 Policy，并按模型规则执行 failover、轮询、权重、优先级和 sticky 调度；提供可观测路由记录与可选 SQLite 持久化。",
       "author": "kitdine",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "repository": "https://github.com/kitdine/cpa-plugin-key-chain-router",
       "homepage": "https://github.com/kitdine/cpa-plugin-key-chain-router",
       "license": "MIT",
-      "tags": ["routing", "failover", "api-key", "oauth", "provider"],
+      "tags": ["routing", "policy", "failover", "round-robin", "weighted", "sticky", "api-key", "oauth", "provider", "observability"],
       "install": {
         "type": "github-release"
       }
