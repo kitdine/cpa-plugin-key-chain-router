@@ -1,0 +1,299 @@
+}
+
+func diagnoseRoute(id, model string) map[string]any {
+	runtimeState.RLock()
+	r := cloneRoute(runtimeState.state.Routes[id])
+	runtimeState.RUnlock()
+	if r == nil {
+		return map[string]any{"ok": false, "error": "route not found"}
+	}
+	_, resources, _ := currentEnvironment()
+	byID := map[string]apiResource{}
+	byIndex := map[string]apiResource{}
+	for _, x := range resources {
+		byID[x.ID] = x
+		if x.AuthIndex != "" {
+			byIndex[x.AuthIndex] = x
+		}
+	}
+	match := modelMatches(r.MatchModels, model)
+	items := []map[string]any{}
+	first := ""
+	for i, c := range r.Candidates {
+		if c == nil {
+			continue
+		}
+		res, ok := byID[c.ResourceID]
+		if !ok && c.AuthIndex != "" {
+			res, ok = byIndex[c.AuthIndex]
+		}
+		available := c.Enabled && ok && !res.Unavailable && strings.ToLower(res.Status) != "disabled"
+		if available && first == "" {
+			first = c.Name
+		}
+		effectiveModel := c.OverrideModel
+		if effectiveModel == "" {
+			effectiveModel = model
+		}
+		items = append(items, map[string]any{"order": i + 1, "name": c.Name, "enabled": c.Enabled, "resource_found": ok, "available": available, "provider": c.Provider, "auth_index": c.AuthIndex, "status": res.Status, "override_model": c.OverrideModel, "effective_model": effectiveModel})
+	}
+	curl := buildDiagnosticCurl(r, model)
+	runtimeState.RLock()
+	last, hasLast := runtimeState.recent[id]
+	runtimeState.RUnlock()
+	resp := map[string]any{"ok": true, "route": r, "model": model, "model_matches": match, "candidates": items, "expected_first": first, "curl": curl, "note": "这是静态诊断，不会实际调用上游；API Provider 的 configured 状态不代表当前无 cooldown。真实 failover 请复制 curl 执行后查看 CPA usage/request log。"}
+	if hasLast {
+		resp["last_trace"] = last
+	}
+	return resp
+}
+
+func buildDiagnosticCurl(r *Route, model string) string {
+	if model == "" {
+		model = firstConcretePattern(r.MatchModels)
+		if model == "" {
+			model = "<MODEL>"
+		}
+	}
+	return fmt.Sprintf("curl http://<CPA_HOST>:8317/v1/responses \\\n  -H 'Authorization: Bearer <该路由对应的完整 CPA API Key>' \\\n  -H 'Content-Type: application/json' \\\n  -d '{\"model\":\"%s\",\"input\":\"只回复 ROUTE_OK\"}'", strings.ReplaceAll(model, "'", ""))
+}
+func firstConcretePattern(xs []string) string {
+	for _, x := range xs {
+		if x != "*" && !strings.ContainsAny(x, "*?") {
+			return x
+		}
+	}
+	return ""
+}
+
+func currentEnvironment() ([]downstreamKey, []apiResource, string) {
+	runtimeState.RLock()
+	path := runtimeState.configPath
+	runtimeState.RUnlock()
+	if path == "" {
+		return nil, oauthResourcesOnly(), "无法定位当前 CPA config.yaml"
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, oauthResourcesOnly(), err.Error()
+	}
+	keys, apis := parseCPAConfig(string(data))
+	oauth := oauthResourcesOnly()
+	resources := mergeResources(oauth, apis)
+	return keys, resources, ""
+}
+
+func oauthResourcesOnly() []apiResource {
+	raw, err := callHost(methodHostAuthList, map[string]any{})
+	if err != nil {
+		return nil
+	}
+	var resp hostAuthListResponse
+	if json.Unmarshal(raw, &resp) != nil {
+		return nil
+	}
+	out := []apiResource{}
+	for _, a := range resp.Files {
+		p := strings.TrimSpace(a.Provider)
+		if p == "" {
+			p = a.Type
+		}
+		name := strings.TrimSpace(a.Email)
+		if name == "" {
+			name = a.Label
+		}
+		if name == "" {
+			name = a.Name
+		}
+		if name == "" {
+			name = a.ID
+		}
+		id := "oauth:" + a.AuthIndex
+		if a.AuthIndex == "" {
+			id = "oauth-id:" + a.ID
+		}
+		out = append(out, apiResource{ID: id, Kind: "OAuth", Provider: p, DisplayName: name, AuthID: a.ID, AuthIndex: a.AuthIndex, Status: a.Status, Unavailable: a.Unavailable})
+	}
+	return out
+}
+
+func mergeResources(a, b []apiResource) []apiResource {
+	seen := map[string]bool{}
+	out := []apiResource{}
+	for _, xs := range [][]apiResource{a, b} {
+		for _, r := range xs {
+			key := r.AuthIndex
+			if key == "" {
+				key = r.ID
+			}
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			out = append(out, r)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Kind == out[j].Kind {
+			return out[i].DisplayName < out[j].DisplayName
+		}
+		return out[i].Kind < out[j].Kind
+	})
+	return out
+}
+
+func parseCPAConfig(raw string) ([]downstreamKey, []apiResource) {
+	lines := preprocessYAMLLines(raw)
+	keys := parseTopStringList(lines, "api-keys")
+	dks := make([]downstreamKey, 0, len(keys))
+	for _, k := range keys {
+		dks = append(dks, downstreamKey{Fingerprint: fingerprint(k), Hint: maskKey(k)})
+	}
+	resources := []apiResource{}
+	specs := []struct{ Section, Kind, Provider, SeedPrefix string }{
+		{"codex-api-key", "API", "codex", "codex-api-key"}, {"xai-api-key", "API", "xai", "xai-api-key"}, {"claude-api-key", "API", "claude", "claude-api-key"}, {"gemini-api-key", "API", "gemini", "gemini-api-key"}, {"interactions-api-key", "API", "gemini-interactions", "interactions-api-key"}, {"vertex-api-key", "API", "vertex", "vertex"},
+	}
+	for _, sp := range specs {
+		for i, e := range parseTopMapList(lines, sp.Section) {
+			key := scalar(e.Fields["api-key"])
+			base := scalar(e.Fields["base-url"])
+			if key == "" && base == "" {
+				continue
+			}
+			prefix := scalar(e.Fields["prefix"])
+			models := modelsFromNested(e.Nested["models"])
+			idx := ""
+			if sp.Section == "vertex-api-key" {
+				id := stableID("vertex:apikey", key, base, scalar(e.Fields["proxy-url"]))
+				idx = stableAuthIndex("id:" + id)
+			} else {
+				idx = stableAuthIndex(sp.SeedPrefix + ":" + base + "+" + key)
+			}
+			name := strings.ToUpper(strings.TrimSuffix(sp.Section, "-api-key")) + " API"
+			if len(models) > 0 {
+				name += " · " + models[0]
+			}
+			rid := fmt.Sprintf("api:%s:%s:%d", sp.Provider, idx, i)
+			resources = append(resources, apiResource{ID: rid, Kind: "API", Provider: sp.Provider, DisplayName: name, AuthIndex: idx, Prefix: prefix, BaseURL: base, KeyHint: maskKey(key), Status: "active", Models: models, SuggestedModel: suggestedModel(prefix, models)})
+		}
+	}
+	for i, e := range parseTopMapList(lines, "openai-compatibility") {
+		if parseBool(scalar(e.Fields["disabled"]), false) {
+			continue
+		}
+		name := scalar(e.Fields["name"])
+		provider := openAICompatibleProviderKey(name)
+		base := scalar(e.Fields["base-url"])
+		prefix := scalar(e.Fields["prefix"])
+		models := modelsFromNested(e.Nested["models"])
+		entries := e.Nested["api-key-entries"]
+		if len(entries) == 0 {
+			entries = []yamlMapEntry{{Fields: map[string]string{}}}
+		}
+		for j, kent := range entries {
+			key := scalar(kent.Fields["api-key"])
+			idx := ""
+			if key != "" {
+				idx = stableAuthIndex("openai-compatibility:" + base + "+" + key)
+			} else {
+				id := stableID("openai-compatibility:"+strings.ToLower(strings.TrimSpace(name)), base)
+				idx = stableAuthIndex("id:" + id)
+			}
+			display := name
+			if display == "" {
+				display = "OpenAI Compatibility"
+			}
+			rid := fmt.Sprintf("api:%s:%s:%d:%d", provider, idx, i, j)
+			resources = append(resources, apiResource{ID: rid, Kind: "API", Provider: provider, DisplayName: display, AuthIndex: idx, Prefix: prefix, BaseURL: base, KeyHint: maskKey(key), Status: "active", Models: models, SuggestedModel: suggestedModel(prefix, models)})
+		}
+	}
+	return dks, resources
+}
+
+func suggestedModel(prefix string, models []string) string {
+	if len(models) == 0 {
+		return ""
+	}
+	m := models[0]
+	if prefix != "" && !strings.HasPrefix(m, prefix+"/") {
+		return prefix + "/" + m
+	}
+	return m
+}
+func openAICompatibleProviderKey(name string) string {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" {
+		return "openai-compatibility"
+	}
+	if name == "openai-compatibility" || strings.HasPrefix(name, "openai-compatible-") {
+		return name
+	}
+	return "openai-compatible-" + name
+}
+func stableID(kind string, parts ...string) string {
+	h := sha256.New()
+	h.Write([]byte(kind))
+	for _, p := range parts {
+		h.Write([]byte{0})
+		h.Write([]byte(strings.TrimSpace(p)))
+	}
+	sum := hex.EncodeToString(h.Sum(nil))
+	return kind + ":" + sum[:12]
+}
+func stableAuthIndex(seed string) string {
+	s := sha256.Sum256([]byte(strings.TrimSpace(seed)))
+	return hex.EncodeToString(s[:8])
+}
+
+type yamlLine struct {
+	Indent int
+	Text   string
+}
+type yamlMapEntry struct {
+	Fields map[string]string
+	Nested map[string][]yamlMapEntry
+}
+
+func preprocessYAMLLines(raw string) []yamlLine {
+	out := []yamlLine{}
+	for _, ln := range strings.Split(raw, "\n") {
+		clean := stripYAMLComment(ln)
+		if strings.TrimSpace(clean) == "" {
+			continue
+		}
+		indent := len(clean) - len(strings.TrimLeft(clean, " "))
+		out = append(out, yamlLine{Indent: indent, Text: strings.TrimSpace(clean)})
+	}
+	return out
+}
+func parseTopStringList(lines []yamlLine, section string) []string {
+	start, end := sectionBounds(lines, section)
+	if start < 0 {
+		return nil
+	}
+	out := []string{}
+	for _, l := range lines[start:end] {
+		if l.Indent == 2 && strings.HasPrefix(l.Text, "- ") {
+			v := unquoteYAML(strings.TrimSpace(strings.TrimPrefix(l.Text, "- ")))
+			if v != "" {
+				out = append(out, v)
+			}
+		}
+	}
+	return out
+}
+func sectionBounds(lines []yamlLine, section string) (int, int) {
+	needle := section + ":"
+	for i, l := range lines {
+		if l.Indent == 0 && strings.HasPrefix(l.Text, needle) {
+			end := len(lines)
+			for j := i + 1; j < len(lines); j++ {
+				if lines[j].Indent == 0 {
+					end = j
+					break
+				}
+			}
+			return i + 1, end
+		}
+	}
+	return -1, -1
