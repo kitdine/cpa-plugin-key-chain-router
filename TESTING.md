@@ -1,185 +1,172 @@
-# Key Chain Router v0.3.0 测试清单
+# v0.4.0 测试清单
 
-## 1. 插件加载
-
-确认：
-
-```text
-plugin loaded ... key-chain-router ... 0.3.0
-plugin registered ... key-chain-router ... 0.3.0
-```
-
-## 2. 页面
-
-打开：
-
-```text
-/v0/resource/plugins/key-chain-router/status
-```
-
-确认：
-
-- 无 Management Secret
-- 能自动读取下游 CPA API Key（仅脱敏）
-- OAuth credential 正常显示
-- API Provider credential 正常显示
-- API Key/Provider secret 没有明文出现在页面
-
-## 3. 模型匹配
-
-路由设置：
-
-```text
-匹配模型: *
-```
-
-客户端分别发送：
-
-```text
-gpt-5.6-luna
-gpt-5.6-sol
-```
-
-两者都应命中同一个 Key route。
-
-再改为：
-
-```text
-匹配模型: gpt-5.6-luna
-```
-
-则：
-
-```text
-gpt-5.6-luna -> 命中
-gpt-5.6-sol  -> CPA 默认路由，不由该 Key route 接管
-```
-
-## 4. 原模型继承
-
-候选 A/B/C 的覆盖模型全部留空。
-
-客户端请求：
-
-```json
-{"model":"gpt-5.6-luna"}
-```
-
-诊断/真实请求轨迹中 A/B/C 的 effective model 都应为：
-
-```text
-gpt-5.6-luna
-```
-
-不应该出现 `code`。
-
-## 5. 单候选覆盖
-
-只给 X 填：
-
-```text
-x/gpt-5.6-luna
-```
-
-预期：
-
-```text
-A -> gpt-5.6-luna
-B -> gpt-5.6-luna
-C -> gpt-5.6-luna
-X -> x/gpt-5.6-luna
-```
-
-## 6. 测试路由 / 静态诊断
-
-点击“测试路由”，输入模型。
-
-应显示：
-
-- 模型是否匹配
-- 候选顺序
-- provider
-- auth_index
-- effective model
-- 当前资源是否存在
-- 预计第一候选
-- curl
-
-## 7. 真实执行轨迹
-
-复制诊断页 curl，在可信终端执行。
-
-然后回诊断页刷新。
-
-正常请求应出现：
-
-```text
-最近一次真实执行
-1. A ... 200
-最终 A
-```
-
-模拟 failover：
-
-```text
-A -> 429
-B -> 503
-C -> 200
-```
-
-诊断中应显示：
-
-```text
-1. A ... 429
-2. B ... 503
-3. C ... 200
-最终 C
-```
-
-同时在 CPA Token Usage / Request Log 检查最终：
-
-```text
-api_key    = 当前下游 CPA 原生 Key
-provider   = C 的 provider
-auth_index = C 的 AuthIndex
-model      = effective model
-```
-
-## 8. 两把 Key 独立链
-
-```text
-Key1: A -> B -> C -> X -> Y -> Z
-Key2: X -> Y -> Z -> A -> B -> C
-```
-
-分别请求，确认顺序不会串线。
-
-## 9. 不 fallback
-
-首候选返回：
-
-```text
-400 / 404 / 422
-```
-
-不得进入下一候选。
-
-## 10. Streaming
-
-- 上游在第一 chunk 前失败 -> 允许下一候选
-- 已输出第一 chunk 后失败 -> 终止，不拼接另一个候选
-
-## 11. State 安全
-
-检查：
+## CI
 
 ```bash
-cat plugins/linux/amd64/key-chain-router-state.json
+cd src
+go test ./...
+go vet ./...
+node --check ui.js
+cd ..
+bash ./scripts/build.sh
+cd src
+python3 abi_smoke.py ../dist/key-chain-router-v0.4.0.so
 ```
 
-应：
+必须验证 `c-shared` 产物导出：
 
-- 权限 0600
-- 无下游 API Key 明文
-- 无 API Provider key 明文
-- 有 fingerprint / key_hint / provider / AuthIndex / match_models / override_model
+```text
+cliproxy_plugin_init
+keyChainRouterPluginCall
+keyChainRouterPluginFree
+keyChainRouterPluginShutdown
+```
+
+## 1. v0.3 → v0.4 迁移
+
+使用旧 state 启动 v0.4：
+
+- 同一 API Key 的多个旧 Route 必须合并成一个 Policy。
+- 每个旧 Route 变成一条 Rule。
+- Rule 默认 `ordered-failover`。
+- 旧候选顺序、AuthIndex 和 override model 保留。
+- state 升级为 version 4。
+
+## 2. 唯一 Policy 约束
+
+- 同一个下游 API Key 在 UI 中不能再次“新建 Policy”。
+- 同一 Policy 中重复 exact model 应保存失败。
+- 最多只能有一个 `*` Rule。
+- exact model > glob > `*`。
+
+## 3. 策略验证
+
+### ordered-failover
+
+A 失败 → B → C。
+
+### round-robin
+
+连续请求应看到首选：
+
+```text
+A → B → C → A
+```
+
+### weighted-round-robin
+
+配置 5:3:2，较大样本下应接近 50% / 30% / 20%，且使用 Smooth WRR 而不是随机突发。
+
+### priority-weighted
+
+Priority 100 组只要有候选可选，首选不能来自 Priority 50。组内按 Weight 分配。
+
+### sticky
+
+相同 `X-Session-Id` 连续请求首选必须稳定；更换 session 应允许映射到其他候选。
+
+### cpa-default
+
+命中后最近记录必须显示：
+
+```text
+KCR_BYPASS_CPA_DEFAULT
+```
+
+并由 CPA 默认 router 处理。
+
+## 4. Failover 行为
+
+分别模拟：
+
+```text
+network
+401/403
+408
+409
+429
+5xx
+```
+
+验证 `next`、`same-priority-first`、`next-priority`、`stop`、`cpa-default`。
+
+候选耗尽配置为 `cpa-default` 时，必须出现：
+
+```text
+KCR_FALLBACK_TO_CPA
+```
+
+而不是伪装成 `KCR_HANDLED`。
+
+## 5. 可观测性
+
+默认：
+
+```text
+memory=true
+log=true
+sqlite=false
+response_headers=false
+```
+
+真实请求后页面“最近路由记录”必须能看到：decision、model、Policy、Rule、Strategy、尝试链、最终 Provider/AuthIndex、耗时。
+
+CPA 日志搜索：
+
+```text
+kcr routing decision
+```
+
+应包含相同决策字段。
+
+## 6. SQLite
+
+开启后确认数据库生成，并启用 WAL。检查：
+
+```sql
+SELECT * FROM routing_events ORDER BY at DESC LIMIT 10;
+SELECT * FROM routing_attempts ORDER BY id DESC LIMIT 20;
+```
+
+确认数据库中不存在：
+
+- 完整 downstream API Key
+- upstream API secret
+- OAuth token
+- Prompt / request body / response body
+
+关闭 SQLite 后模型请求仍应正常；模拟 DB 不可写/queue 满时，也不得阻塞路由。
+
+## 7. 响应 Header
+
+默认请求响应不应出现 `X-KCR-*`。
+
+开启调试响应 Header 后，命中 KCR 的非流式请求应有：
+
+```text
+X-KCR-Decision
+X-KCR-Trace-ID
+X-KCR-Rule
+```
+
+不得包含 AuthIndex、API Key、token。
+
+## 8. Streaming
+
+- 首 chunk 前失败允许 failover。
+- 已发送首 chunk 后失败必须终止，不允许拼接另一上游内容。
+- 最终仍写一条 RoutingEvent。
+
+## 9. CPA 原生监控
+
+最终成功请求继续核对 CPA Usage / Token Usage：
+
+```text
+api_key
+provider
+auth_id / auth_index
+model
+input/output/cache tokens
+```
+
+必须仍由 CPA 原生链记录。
