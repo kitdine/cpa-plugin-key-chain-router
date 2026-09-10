@@ -4,9 +4,9 @@
     {
       "id": "key-chain-router",
       "name": "Key Chain Router",
-      "description": "按 CPA 原生下游 API Key 建立唯一 Policy，并按模型规则执行 failover、轮询、权重、优先级和 sticky 调度；提供可查询路由记录、选择原因、统计与可选 SQLite 持久化。",
+      "description": "按 CPA 原生下游 API Key 建立唯一 Policy，并按模型规则执行 failover、轮询、权重、优先级和 sticky 调度；提供可查询路由记录、选择原因、统计与 SQLite 持久化历史。",
       "author": "kitdine",
-      "version": "0.6.1",
+      "version": "0.6.2",
       "repository": "https://github.com/kitdine/cpa-plugin-key-chain-router",
       "homepage": "https://github.com/kitdine/cpa-plugin-key-chain-router",
       "license": "MIT",
@@ -17,9 +17,9 @@
           {
             "goos": "linux",
             "goarch": "amd64",
-            "url": "https://raw.githubusercontent.com/kitdine/cpa-plugin-key-chain-router/plugin-store-artifacts/artifacts/key-chain-router_0.6.1_linux_amd64.zip",
-            "sha256": "cd634ec51cd35f95af67d1a5240fc2994201d0d689d0b5485a131d03167559ac",
-            "size": 2887311
+            "url": "https://raw.githubusercontent.com/kitdine/cpa-plugin-key-chain-router/plugin-store-artifacts/artifacts/key-chain-router_0.6.2_linux_amd64.zip",
+            "sha256": "5441d373aa23f06c3b7e592d9b8205bc8509524fd4f72499d8338ddd3de873b8",
+            "size": 2931718
           }
         ]
       }
