@@ -1,0 +1,155 @@
+name: One-shot v0.6.1 routing table UI
+
+on:
+  push:
+    branches:
+      - feat/v0.6.1-compact-routing-table
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.event.head_commit.message == 'chore: add one-shot v0.6.1 UI patch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/v0.6.1-compact-routing-table
+          fetch-depth: 0
+
+      - name: Patch routing log UI
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          ui_path = Path('src/ui.js')
+          ui = ui_path.read_text()
+          ui = ui.replace('let EVENT_DATA = null;\n', 'let EVENT_DATA = null;\nlet EVENT_EXPANDED = new Set();\n')
+
+          replacement = r'''function fmtEventTime(at) {
+            if (!at) return '-';
+            const s = String(at);
+            const m = s.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}:\d{2}:\d{2})/);
+            return m ? m[2] + '-' + m[3] + ' ' + m[4] : s;
+          }
+
+          function eventState(e) {
+            if (e.success === false) return { cls: 'event-state-error', label: '失败' };
+            if (e.decision === 'KCR_FALLBACK_TO_CPA') return { cls: 'event-state-fallback', label: 'Fallback' };
+            if (e.decision === 'KCR_BYPASS_CPA_DEFAULT') return { cls: 'event-state-bypass', label: 'Bypass' };
+            return { cls: 'event-state-ok', label: '成功' };
+          }
+
+          function eventStatusText(e) {
+            if (e.status) return String(e.status);
+            if (e.success === false) return 'ERR';
+            return '-';
+          }
+
+          function toggleEvent(traceID) {
+            if (!traceID) return;
+            if (EVENT_EXPANDED.has(traceID)) EVENT_EXPANDED.delete(traceID);
+            else EVENT_EXPANDED.add(traceID);
+            renderEvents();
+          }
+
+          function renderEventDetail(e) {
+            const eventReason = reasonLabel(e.reason);
+            const details = [
+              e.decision ? 'Decision ' + e.decision : '',
+              e.auth_index ? '最终 AuthIndex ' + e.auth_index : '',
+              e.key_hint ? 'API Key ' + e.key_hint : '',
+              e.trace_id ? 'Trace ' + e.trace_id : ''
+            ].filter(Boolean).join(' · ');
+            return '<div class="event-detail">' +
+              (eventReason ? '<div class="event-detail-reason"><b>路由结果：</b>' + esc(eventReason) + '</div>' : '') +
+              '<div class="muted small event-detail-meta">' + esc(details) + '</div>' +
+              '<div class="event-detail-title">候选尝试</div>' +
+              '<div class="attempts">' + ((e.attempts || []).length ? (e.attempts || []).map((a, i) => renderAttempt(e, a, i)).join('') : '<div class="muted small">没有候选尝试记录</div>') + '</div>' +
+              '</div>';
+          }
+
+          function renderEvents() {
+            if (!EVENT_DATA) return;
+            const xs = EVENT_DATA.events || [];
+            const meta = '当前内存窗口 ' + (EVENT_DATA.window_total || 0) + ' 条 · 匹配 ' + (EVENT_DATA.matched || 0) +
+              ' 条 · 返回 ' + (EVENT_DATA.returned || 0) + ' 条 · 内存上限 ' + (EVENT_DATA.memory_limit || 0) +
+              (EVENT_DATA.memory_on ? '' : '（内存记录已关闭）');
+            $('eventResultMeta').textContent = meta;
+
+            if (!xs.length) {
+              $('events').innerHTML = '<div class="muted" style="padding:18px 0">当前条件下暂无路由记录</div>';
+              return;
+            }
+
+            const rows = xs.map((e) => {
+              const key = e.trace_id || e.at;
+              const expanded = EVENT_EXPANDED.has(key);
+              const state = eventState(e);
+              const attempts = (e.attempts || []).length;
+              const policyRule = '<div class="event-primary">' + esc(e.policy_name || '-') + '</div>' +
+                '<div class="muted small ellipsis">' + esc(e.rule_name || '-') + '</div>';
+              const final = e.final || (e.decision === 'KCR_FALLBACK_TO_CPA' ? 'CPA Default' : '-');
+              const row = '<tr class="event-row ' + (expanded ? 'expanded' : '') + '" onclick="toggleEvent(\'' + esc(key) + '\')" title="点击查看路由详情">' +
+                '<td class="event-toggle"><span class="chevron">' + (expanded ? '▾' : '›') + '</span></td>' +
+                '<td class="event-time mono" title="' + esc(e.at || '') + '">' + esc(fmtEventTime(e.at)) + '</td>' +
+                '<td><div class="event-primary ellipsis" title="' + esc(e.model || '') + '">' + esc(e.model || '-') + '</div></td>' +
+                '<td>' + policyRule + '</td>' +
+                '<td><span class="strategy-chip" title="' + esc(e.strategy || '') + '">' + esc(e.strategy || '-') + '</span></td>' +
+                '<td><div class="event-primary ellipsis" title="' + esc(final) + '">' + esc(final) + '</div></td>' +
+                '<td><span class="ellipsis" title="' + esc(e.provider || '') + '">' + esc(e.provider || '-') + '</span></td>' +
+                '<td><span class="event-state ' + state.cls + '"><i></i>' + esc(state.label) + '</span><span class="http-code">' + esc(eventStatusText(e)) + '</span></td>' +
+                '<td class="event-duration">' + esc(Number.isFinite(Number(e.duration_ms)) ? e.duration_ms + ' ms' : '-') + '</td>' +
+                '<td class="event-attempt-count"><span class="attempt-count ' + (attempts > 1 ? 'multi' : '') + '">' + attempts + '</span></td>' +
+                '</tr>';
+              const detail = expanded ? '<tr class="event-detail-row"><td colspan="10">' + renderEventDetail(e) + '</td></tr>' : '';
+              return row + detail;
+            }).join('');
+
+            $('events').innerHTML = '<div class="event-table-wrap"><table class="event-table"><thead><tr>' +
+              '<th></th><th>时间</th><th>Model</th><th>Policy / Rule</th><th>Strategy</th><th>最终候选</th><th>Provider</th><th>状态</th><th>耗时</th><th>Attempts</th>' +
+              '</tr></thead><tbody>' + rows + '</tbody></table></div>';
+          }'''
+
+          pattern = r'function renderEvents\(\) \{.*?\n\}\n\nload\(\)\.catch'
+          new_ui, n = re.subn(pattern, replacement + '\n\nload().catch', ui, count=1, flags=re.S)
+          if n != 1:
+              raise SystemExit(f'failed to replace renderEvents block: {n}')
+          ui_path.write_text(new_ui)
+
+          page_path = Path('src/page.html')
+          page = page_path.read_text()
+          extra_css = r'''
+.event-table-wrap{margin-top:10px;border:1px solid #e2e8f0;border-radius:12px;overflow:auto;background:#fff}.event-table{width:100%;border-collapse:separate;border-spacing:0;table-layout:fixed;font-size:13px}.event-table th{position:sticky;top:0;z-index:1;text-align:left;padding:9px 10px;background:#f8fafc;color:#64748b;border-bottom:1px solid #e2e8f0;font-size:12px;font-weight:700;white-space:nowrap}.event-table th:nth-child(1){width:34px}.event-table th:nth-child(2){width:125px}.event-table th:nth-child(3){width:145px}.event-table th:nth-child(4){width:180px}.event-table th:nth-child(5){width:145px}.event-table th:nth-child(6){width:150px}.event-table th:nth-child(7){width:105px}.event-table th:nth-child(8){width:118px}.event-table th:nth-child(9){width:95px}.event-table th:nth-child(10){width:72px}.event-row{cursor:pointer}.event-row td{height:48px;padding:7px 10px;border-bottom:1px solid #edf2f7;vertical-align:middle;background:#fff}.event-row:hover td{background:#f8fbff}.event-row.expanded td{background:#f6f9fd;border-bottom-color:#dbe6f3}.event-toggle{text-align:center!important;padding-left:6px!important;padding-right:2px!important}.chevron{display:inline-flex;width:20px;height:20px;align-items:center;justify-content:center;border-radius:6px;color:#64748b;font-size:19px;line-height:1}.event-row:hover .chevron{background:#e8eef7;color:#243244}.event-primary{font-weight:650;color:#29384c}.ellipsis{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.event-time{font-size:12px;color:#64748b;white-space:nowrap}.strategy-chip{display:inline-block;max-width:100%;padding:3px 7px;border-radius:6px;background:#f1f5f9;color:#52647b;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.event-state{display:inline-flex;align-items:center;gap:5px;font-weight:650;margin-right:5px;white-space:nowrap}.event-state i{width:7px;height:7px;border-radius:50%;display:inline-block}.event-state-ok{color:#16713a}.event-state-ok i{background:#22a05a}.event-state-fallback{color:#a65a09}.event-state-fallback i{background:#e89a2f}.event-state-bypass{color:#64748b}.event-state-bypass i{background:#94a3b8}.event-state-error{color:#b42318}.event-state-error i{background:#dc493f}.http-code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#738196;font-size:12px}.event-duration,.event-attempt-count{white-space:nowrap}.attempt-count{display:inline-flex;min-width:24px;height:24px;align-items:center;justify-content:center;border-radius:999px;background:#f1f5f9;color:#52647b;font-weight:700}.attempt-count.multi{background:#fff4e5;color:#a65a09}.event-detail-row td{padding:0 10px 12px 44px;background:#f6f9fd;border-bottom:1px solid #dbe6f3}.event-detail{padding:12px 14px;border:1px solid #dbe5f1;border-radius:10px;background:#fff}.event-detail-reason{color:#40536d}.event-detail-meta{margin-top:6px;word-break:break-all}.event-detail-title{font-weight:700;margin-top:12px;margin-bottom:7px}.event-table .attempt{margin:0;padding:8px 10px}.event-table .attempts{gap:6px;margin-top:0}
+@media(max-width:1050px){.event-table{min-width:1050px}.event-table-wrap{overscroll-behavior-x:contain}}@media(max-width:700px){.event-table{min-width:0;table-layout:auto}.event-table thead{display:none}.event-table,.event-table tbody{display:block}.event-row{display:grid;grid-template-columns:28px 1fr auto;align-items:center;border-bottom:1px solid #e7edf5;padding:7px 4px}.event-row td{display:none;height:auto;border:0;padding:3px 7px}.event-row td:nth-child(1),.event-row td:nth-child(3),.event-row td:nth-child(8){display:block;background:transparent!important}.event-row td:nth-child(1){grid-column:1}.event-row td:nth-child(3){grid-column:2}.event-row td:nth-child(8){grid-column:3}.event-row:after{content:'点击查看详情';grid-column:2;color:#94a3b8;font-size:11px;padding:0 7px 3px}.event-detail-row{display:block}.event-detail-row td{display:block!important;padding:8px 6px 12px;background:#f6f9fd}.event-detail{font-size:12px}}
+'''
+          if '</style>' not in page:
+              raise SystemExit('page style terminator not found')
+          page = page.replace('</style>', extra_css + '</style>', 1)
+          old_hint = '只记录已配置 KCR Policy 的请求；未配置 Policy 的 API Key 直接忽略，不显示也不存储。</div>'
+          new_hint = '只记录已配置 KCR Policy 的请求；未配置 Policy 的 API Key 直接忽略，不显示也不存储。列表默认保持紧凑，点击任意行展开候选尝试和选择原因。</div>'
+          if old_hint not in page:
+              raise SystemExit('events hint not found')
+          page = page.replace(old_hint, new_hint, 1)
+          page_path.write_text(page)
+          PY
+
+      - name: Validate
+        run: |
+          node --check src/ui.js
+          git diff --check
+          grep -q 'event-table' src/page.html
+          grep -q 'toggleEvent' src/ui.js
+
+      - name: Commit generated UI
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/one-shot-v061-ui.yml
+          git add src/ui.js src/page.html
+          git commit -m 'feat: compact routing events into expandable table'
+          git push origin HEAD:feat/v0.6.1-compact-routing-table
