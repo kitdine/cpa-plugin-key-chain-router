@@ -1,5 +1,40 @@
 # Changelog
 
+## v0.5.0 - 2026-09-10
+
+修复 v0.4.0 的 credential 调度错误，并收紧策略配置界面的字段展示。
+
+### 调度修复
+
+- Scheduler 不再把 `Candidates[].id` 当作运行时 `AuthID`。
+- KCR ticket 继续保存稳定的 `AuthIndex + Provider`。
+- `scheduler.pick` 收到 ticket 后实时调用 `host.auth.list`，通过 `AuthIndex` 找到真实 `files[].id` 并返回该 `AuthID`。
+- `AuthIndex` 重复时使用 Provider/Type 消歧；无法唯一解析时 fail closed，避免 CPA 默认 scheduler 静默选到其他 credential。
+- ABI smoke 增加回归场景：scheduler candidate ID 故意与真实 AuthID 不一致，确保只能通过 `AuthIndex → host.auth.list → AuthID` 路径成功。
+
+### 管理界面
+
+- `ordered-failover` / `round-robin` 隐藏 Priority 与 Weight。
+- `weighted-round-robin` 仅显示 Weight。
+- `priority-weighted` / `sticky` 显示 Priority 与 Weight。
+- Policy 概览和诊断表同步隐藏当前 Strategy 不使用的字段。
+
+### 发布与测试
+
+- ABI smoke 不再写死 v0.4.x，改为校验当前构建版本。
+- `go test ./...`、`go vet`、JavaScript syntax、Linux amd64 build、ABI smoke 与 binary inspection 全部纳入发布验证。
+
+## v0.4.0 - 2026-09-09
+
+引入 Policy / Rule 动态策略引擎。
+
+- 一个下游 API Key 对应一个 Policy，可包含多条模型 Rule。
+- 支持精确 model、glob 与 `*` catch-all，并按特异性决定命中规则。
+- 新增 ordered failover、round robin、smooth weighted round robin、priority + weight、sticky / weighted rendezvous hash、CPA default 等策略。
+- 支持按失败类型配置 failover 动作和最大尝试次数。
+- 新增路由决策事件、内存记录、CPA 日志、可选 SQLite 持久化与调试响应 Header。
+- v0.3 state 自动迁移为 v0.4 Policy / Rule 结构。
+
 ## v0.3.0 - 2026-09-09
 
 首个正式发布版本。
