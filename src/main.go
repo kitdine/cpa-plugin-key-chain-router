@@ -641,26 +641,18 @@ func handleSchedulerPick(raw []byte) ([]byte, error) {
 	if !ok {
 		return okEnvelope(map[string]any{"Handled": false})
 	}
-	candidates := anySlice(req["Candidates"])
-	for _, v := range candidates {
-		m := anyMap(v)
-		idx := stringAny(m, "AuthIndex")
-		if idx == "" {
-			idx = stringAny(m, "auth_index")
-		}
-		id := stringAny(m, "ID")
-		if id == "" {
-			id = stringAny(m, "id")
-		}
-		provider := stringAny(m, "Provider")
+	provider := strings.TrimSpace(rec.Provider)
+	if provider == "" {
+		provider = stringAny(req, "Provider")
 		if provider == "" {
-			provider = stringAny(m, "provider")
-		}
-		if idx != "" && idx == rec.AuthIndex && (rec.Provider == "" || strings.EqualFold(provider, rec.Provider)) {
-			return okEnvelope(map[string]any{"AuthID": id, "Handled": true})
+			provider = stringAny(req, "provider")
 		}
 	}
-	return okEnvelope(map[string]any{"Handled": true, "AuthID": ""})
+	authID, err := resolveAuthIDByIndex(rec.AuthIndex, provider)
+	if err != nil {
+		return okEnvelope(map[string]any{"Handled": true, "AuthID": "", "Reason": "kcr_auth_resolution_failed"})
+	}
+	return okEnvelope(map[string]any{"Handled": true, "AuthID": authID})
 }
 
 func handleExecute(raw []byte, streaming bool) ([]byte, error) {
