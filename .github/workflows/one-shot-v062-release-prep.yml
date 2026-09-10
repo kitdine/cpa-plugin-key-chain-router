@@ -1,0 +1,99 @@
+name: One-shot v0.6.2 release prep
+
+on:
+  push:
+    branches:
+      - release/v0.6.2
+
+permissions:
+  contents: write
+
+jobs:
+  prep:
+    if: github.event.head_commit.message == 'run v0.6.2 release prep'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: release/v0.6.2
+          fetch-depth: 0
+      - name: Update release metadata
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          Path('VERSION').write_text('0.6.2\n')
+
+          p = Path('CHANGELOG.md')
+          s = p.read_text()
+          entry = '''## v0.6.2 - 2026-09-10
+
+修复 SQLite “只写不读”的持久化缺口，使路由记录在页面刷新、插件重载和 CPA 重启后仍可查询。
+
+### SQLite 持久化查询
+
+- SQLite 开启且 active 时，管理页 `events` 查询直接读取 SQLite，而不是只读取进程内 `v4Runtime.recent`。
+- 数据库查询完整支持现有全文搜索、Decision、成功/失败、Policy、Strategy、Provider、Model、HTTP 状态、时间范围和返回上限。
+- 统计卡、P95 和筛选 facets 在 SQLite 模式下同样基于持久化数据计算。
+- `routing_events` 新增 `error` 字段并自动迁移旧数据库，最终错误信息也可跨重启查看。
+
+### SQLite 健康状态
+
+- 管理页显示 SQLite 是否运行、实际绝对路径、文件大小、Events / Attempts 行数、journal mode、最后写入/最后持久化时间和最后错误。
+- writer INSERT 错误不再静默吞掉，会记录到健康状态并写 CPA host error log。
+- SQLite 打开失败不再导致 plugin register/reconfigure 失败；路由继续工作并自动回退到 Memory 查询，同时暴露数据库错误。
+
+### 测试
+
+- 新增持久化回归测试：Memory 为空但 SQLite 中存在事件时，路由记录仍能返回 event、attempts 和 selection reasons。
+- PR CI 已通过 Go test、Go vet、JavaScript syntax、Linux amd64 c-shared build、ABI smoke、binary inspection 和 artifact packaging。
+
+'''
+          anchor = '# Changelog\n\n'
+          if anchor not in s:
+              raise SystemExit('CHANGELOG anchor missing')
+          if '## v0.6.2 ' not in s:
+              s = s.replace(anchor, anchor + entry, 1)
+          p.write_text(s)
+
+          p = Path('README.md')
+          s = p.read_text()
+          s = s.replace('# CPA Key Chain Router v0.6.1', '# CPA Key Chain Router v0.6.2', 1)
+          section = '''## v0.6.2 SQLite 持久化修复
+
+v0.6.2 将 SQLite 从“仅写入归档”升级为管理页真正使用的持久化数据源：
+
+- SQLite 开启且正常运行时，“路由记录”的查询、筛选和统计直接读取数据库。
+- 页面刷新、插件 reconfigure/reload 或 CPA 进程重启后，数据库中的历史路由记录仍然可见。
+- 可观测性页面会显示 SQLite 的运行状态、实际绝对路径、数据库文件大小、Events / Attempts 数量、WAL journal、最后写入时间和最后错误。
+- 数据库打开或写入失败不会影响模型路由；插件会保留路由能力、记录错误，并在查询端回退到 Memory。
+- `routing_events` 新增最终 `error` 字段，旧数据库启动时自动迁移。
+
+数据源规则：**SQLite ON + active → SQLite；否则 → Memory**。因此开启 SQLite 后，路由记录不再受内存 ring buffer 清空影响。
+
+'''
+          anchor = '## v0.6.1 紧凑路由列表\n'
+          if anchor not in s:
+              raise SystemExit('README section anchor missing')
+          if '## v0.6.2 SQLite 持久化修复' not in s:
+              s = s.replace(anchor, section + anchor, 1)
+          old = '查询 API 使用当前内存 ring buffer 作为数据源，默认最多返回 200 条、上限 1000 条；内存窗口大小仍由“可观测性 → 内存最大记录数”控制。'
+          new = '查询 API 会根据运行状态选择数据源：SQLite 开启且 active 时直接读取持久化数据库；否则使用当前内存 ring buffer。默认最多返回 200 条、上限 1000 条。'
+          if old not in s:
+              raise SystemExit('README query-source paragraph missing')
+          s = s.replace(old, new, 1)
+          s = s.replace('key-chain-router-v0.6.1.so', 'key-chain-router-v0.6.2.so')
+          p.write_text(s)
+          PY
+          grep -q '^0.6.2$' VERSION
+          grep -q '## v0.6.2' CHANGELOG.md
+          grep -q 'SQLite ON + active' README.md
+          git diff --check
+      - name: Commit release prep
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/one-shot-v062-release-prep.yml
+          git add VERSION CHANGELOG.md README.md
+          git commit -m 'docs: prepare v0.6.2 release'
+          git push origin HEAD:release/v0.6.2
