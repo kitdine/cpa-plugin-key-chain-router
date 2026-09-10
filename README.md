@@ -1,10 +1,24 @@
-# CPA Key Chain Router v0.5.0
+# CPA Key Chain Router v0.6.0
 
 CLIProxyAPI（CPA）v7 动态策略路由插件。保留 CPA 原生下游 `api-keys` 认证、usage 和请求监控，仅在认证后根据下游 API Key、模型和策略选择上游 OAuth / API credential。
 
 当前重点兼容：CLIProxyAPI v7.2.154（schema 5）、Linux amd64 / Debian Bookworm 类环境。
 
-## v0.5.0 关键修复
+## v0.6.0 路由记录
+
+v0.6.0 将“最近路由记录”升级为可查询的路由诊断页：
+
+- 统计当前筛选范围内的请求数、成功率、平均耗时、P95、Fallback 数和平均尝试次数。
+- 支持全文搜索，以及 Decision、成功/失败、Policy、Strategy、Provider、Model、状态码和时间窗口筛选。
+- 每次候选 attempt 都显示“选择原因”，解释为什么首选该 credential，以及失败后为什么切换到下一个候选或 CPA Default。
+- `ordered-failover`、`round-robin`、Smooth Weighted Round Robin、Priority Weighted、Sticky Weighted Rendezvous Hash 都会给出对应的首选依据。
+- Failover 会说明上一候选的结果以及 `next`、`same-priority-first`、`next-priority`、`cpa-default` 等动作。
+
+未配置 KCR Policy 的 API Key 请求不属于 KCR 的有效路由样本，因此 v0.6.0 起这类请求直接忽略：**不进入内存记录、不写 SQLite、不写 `kcr routing decision` host log，也不在管理页显示**。已配置但停用 Policy、已配置 Policy 但 model 未命中 Rule、显式 `cpa-default` 等情况仍保留记录，因为它们对策略诊断有价值。
+
+SQLite 旧数据库会自动增加 `selection_reasons` 字段，并清理历史 `reason=no_policy` 记录。
+
+## v0.5.0 调度修复
 
 v0.5.0 修复 v0.4.0 中 scheduler 将候选 `ID` 误当作真实 `AuthID` 的问题。现在实际调度路径为：
 
@@ -19,7 +33,7 @@ Policy Candidate AuthIndex
 
 `AuthIndex` 继续作为 KCR state 中的稳定定位字段；运行时 `AuthID` 始终从 CPA 当前 `host.auth.list` 解析，不再从 scheduler Candidates 推断。若无法唯一解析，scheduler fail closed，不会静默让 CPA 默认 scheduler 改选其他 credential。
 
-管理 UI 也会根据 Strategy 只展示有效字段：
+管理 UI 会根据 Strategy 只展示有效字段：
 
 - `ordered-failover` / `round-robin`：隐藏 Priority、Weight。
 - `weighted-round-robin`：仅显示 Weight。
@@ -84,24 +98,29 @@ Override Model 留空时继承客户端原始 model；填写时仅该候选覆�
 
 候选全部耗尽后还可选择返回错误或 `cpa-default`。`max_attempts=0` 表示自动按候选数决定。
 
-## 明确知道“插件是否生效”
+## 路由决策与可观测性
 
-每次请求只会显示三种决策之一：
+对于进入 KCR 可观测范围的请求，决策分为：
 
 ```text
 KCR_HANDLED              插件接管并按 Policy/Rule 执行
 KCR_FALLBACK_TO_CPA      插件已接管，但按 Failover 规则最终转 CPA 默认路由
-KCR_BYPASS_CPA_DEFAULT   未命中 Policy/Rule，或 Rule 明确为 cpa-default
+KCR_BYPASS_CPA_DEFAULT   已配置 Policy，但 Rule 未命中或 Rule 明确为 cpa-default
 ```
 
-管理页“最近路由记录”会显示：
+注意：**完全未配置 Policy 的 API Key 不再生成 KCR 路由事件**。
+
+管理页“路由记录”可查看：
 
 ```text
-时间 / API Key hint / model / Policy / Rule / Strategy
-候选尝试链 / status / latency / 最终 resource / Provider / AuthIndex
+时间 / model / Policy / Rule / Strategy
+最终 resource / Provider / AuthIndex / status / latency
+每次候选尝试 / 每次选择原因 / Failover 原因
 ```
 
-CPA 日志默认也会写入 `kcr routing decision`，包含 decision、rule、strategy、provider、auth_index、attempts 和 duration_ms。
+查询 API 使用当前内存 ring buffer 作为数据源，默认最多返回 200 条、上限 1000 条；内存窗口大小仍由“可观测性 → 内存最大记录数”控制。
+
+CPA 日志默认写入 `kcr routing decision`，包含 decision、rule、strategy、provider、auth_index、attempts、duration_ms、reason 和 selection_reasons。
 
 ### 可选调试响应 Header
 
@@ -115,7 +134,7 @@ X-KCR-Rule
 
 不会返回 API secret / OAuth token。内部精确 credential 选择使用一次性 `X-CPA-Key-Chain-Ticket`；票据由 scheduler 单次消费，并通过 `host.auth.list` 将稳定 `AuthIndex` 解析为当前真实 `AuthID`。
 
-## 可观测性
+## 可观测性配置
 
 默认：
 
@@ -130,7 +149,7 @@ SQLite 可在中文页面开启。数据库采用 WAL + busy timeout，由异步
 
 SQLite 表：
 
-- `routing_events`：一条请求的最终决策
+- `routing_events`：一条请求的最终决策、最终结果与 selection reasons
 - `routing_attempts`：该请求的每次候选尝试
 
 只保存路由元数据，不保存 Prompt、请求/响应正文、完整 API Key、上游 API secret 或 OAuth Token。支持保留天数和最大记录数自动清理。
@@ -175,7 +194,7 @@ checksums.txt
 将 Release 中：
 
 ```text
-key-chain-router-v0.5.0.so
+key-chain-router-v0.6.0.so
 ```
 
 放入：
