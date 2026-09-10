@@ -19,7 +19,18 @@ jobs:
           fetch-depth: 0
 
       - name: Patch routing log UI
-        run: python3 scripts/v061_patch.py
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('scripts/v061_patch.py')
+          s = p.read_text()
+          old = "new_ui, n = re.subn(pattern, replacement + '\\n\\nload().catch', ui, count=1, flags=re.S)"
+          new = "new_ui, n = re.subn(pattern, lambda _m: replacement + '\\n\\nload().catch', ui, count=1, flags=re.S)"
+          if old not in s:
+              raise SystemExit('target re.subn line not found')
+          p.write_text(s.replace(old, new, 1))
+          PY
+          python3 scripts/v061_patch.py
 
       - name: Validate
         run: |
