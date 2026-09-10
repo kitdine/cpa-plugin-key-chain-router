@@ -1,7 +1,13 @@
 import base64, ctypes, hashlib, json, os, sys, tempfile, time
 from ctypes import *
 
-SO = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else '../dist/key-chain-router-v0.4.0.so')
+VERSION=os.environ.get('VERSION','').strip()
+SO = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else ('../dist/key-chain-router-v'+VERSION+'.so' if VERSION else '../dist/key-chain-router.so'))
+if not VERSION:
+    name=os.path.basename(SO)
+    prefix='key-chain-router-v'
+    if name.startswith(prefix) and name.endswith('.so'):
+        VERSION=name[len(prefix):-3]
 lib = ctypes.CDLL(SO)
 
 class Buffer(Structure):
@@ -116,7 +122,9 @@ with tempfile.TemporaryDirectory() as td:
     assert reg1['schema_version']==1
     reg=pcall('plugin.reconfigure',{'config_yaml':encoded,'schema_version':5})
     assert reg['metadata']['Name']=='Key Chain Router'
-    assert reg['metadata']['Version'].startswith('0.4.')
+    assert reg['metadata']['Version'], reg
+    if VERSION:
+        assert reg['metadata']['Version']==VERSION, (reg['metadata']['Version'], VERSION)
     assert reg['capabilities']['model_router'] and reg['capabilities']['scheduler'] and reg['capabilities']['executor']
 
     mr=pcall('management.register',{})
