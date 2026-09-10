@@ -1,8 +1,21 @@
-# CPA Key Chain Router v0.6.0
+# CPA Key Chain Router v0.6.1
 
 CLIProxyAPI（CPA）v7 动态策略路由插件。保留 CPA 原生下游 `api-keys` 认证、usage 和请求监控，仅在认证后根据下游 API Key、模型和策略选择上游 OAuth / API credential。
 
 当前重点兼容：CLIProxyAPI v7.2.154（schema 5）、Linux amd64 / Debian Bookworm 类环境。
+
+## v0.6.1 紧凑路由列表
+
+v0.6.1 保留 v0.6.0 的统计、查询和选择原因数据，只优化管理页的日志阅读方式：
+
+- 路由记录改为紧凑表格，一行一个请求。
+- 主列表显示时间、Model、Policy / Rule、Strategy、最终候选、Provider、状态、耗时和 Attempts。
+- 正常请求使用简洁的绿色成功状态，不再重复展示 `KCR_HANDLED` 长字符串；Fallback、Bypass、失败分别突出显示。
+- Attempts > 1 会醒目标记，便于快速定位真正发生过 Failover 的请求。
+- 点击任意行展开完整 Decision、Trace、最终 AuthIndex、候选尝试链和每次“选择原因”。
+- 桌面端表头固定；窄屏自动使用摘要行 + 展开详情。
+
+本版本不改变路由算法、Failover 行为或日志持久化语义。
 
 ## v0.6.0 路由记录
 
@@ -194,7 +207,7 @@ checksums.txt
 将 Release 中：
 
 ```text
-key-chain-router-v0.6.0.so
+key-chain-router-v0.6.1.so
 ```
 
 放入：
