@@ -17,7 +17,7 @@ jobs:
       - name: Install tools
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends git nodejs python3 ca-certificates
+          apt-get install -y --no-install-recommends nodejs python3 ca-certificates
           rm -rf /var/lib/apt/lists/*
       - uses: actions/checkout@v4
         with:
@@ -62,8 +62,6 @@ jobs:
           	}
           	authID, err := resolveAuthIDByIndex(rec.AuthIndex, provider)
           	if err != nil {
-          		// A valid KCR ticket must fail closed. Returning Handled=false here would
-          		// allow CPA's default scheduler to silently choose a different credential.
           		return okEnvelope(map[string]any{"Handled": true, "AuthID": "", "Reason": "kcr_auth_resolution_failed"})
           	}
           	return okEnvelope(map[string]any{"Handled": true, "AuthID": authID})
@@ -73,7 +71,6 @@ jobs:
 
           p = Path('src/ui.js')
           s = p.read_text()
-
           def replace_js_func(src, name, next_name, replacement):
               start = src.index(f"function {name}(")
               end = src.index(f"function {next_name}(", start)
@@ -81,15 +78,11 @@ jobs:
 
           new_render_policies = r'''function renderPolicies(){let out='';for(const p of SNAP.policies){out+='<div class="policy"><div class="row"><div class="grow"><h3 style="margin:0">'+esc(p.name)+' <span class="'+(p.enabled?'green':'muted')+'">'+(p.enabled?'● 启用':'● 停用')+'</span></h3><div class="muted">Key '+esc(p.key_hint)+' · '+p.rules.length+' 条模型规则</div></div><button onclick="diagnose(\''+esc(p.key_fingerprint)+'\')">测试策略</button><button onclick="openPolicy(\''+esc(p.key_fingerprint)+'\')">编辑</button><button onclick="delPolicy(\''+esc(p.key_fingerprint)+'\')">删除</button></div>';for(const r of p.rules){out+='<div class="rule"><div class="row"><b>'+esc(r.name)+'</b><span class="mono muted">'+esc((r.models||['*']).join(', '))+'</span><span class="badge">'+esc(r.strategy)+'</span></div><div class="chain">';let enabled=(r.candidates||[]).filter(c=>c.enabled!==false);enabled.forEach((c,i)=>{out+='<div class="pill"><b>'+esc(c.name)+'</b><div class="muted small">'+candidateMetrics(r,c)+'</div></div>'+(i<enabled.length-1?'→':'')});if(r.strategy==='cpa-default')out+='<div class="pill">CPA 默认路由</div>';out+='</div></div>'}out+='</div>'}if(!out)out='<div class="card muted">还没有 Policy。每个下游 API Key 最多创建一个。</div>';$('policies').innerHTML=out}'''
           s = replace_js_func(s, 'renderPolicies', 'availableKeys', new_render_policies)
-
-          marker = 'function resOptions('
-          pos = s.index(marker)
+          pos = s.index('function resOptions(')
           helpers = r'''function strategyFields(s){return{priority:s==='priority-weighted'||s==='sticky',weight:s==='weighted-round-robin'||s==='priority-weighted'||s==='sticky'}}function candidateMetrics(r,c){let f=strategyFields(r.strategy),xs=[];if(f.priority)xs.push('P'+(c.priority||100));if(f.weight)xs.push('W'+(c.weight||1));return(xs.length?xs.join(' · ')+' · ':'')+esc(c.provider)+(c.override_model?' · → '+esc(c.override_model):' · 原模型')}'''
           s = s[:pos] + helpers + s[pos:]
-
           new_render_cands = r'''function renderCands(r,ri){let f=strategyFields(r.strategy),cols=f.priority&&f.weight?'1.5fr 1.1fr 90px 90px 1.2fr 105px':f.weight?'1.5fr 1.1fr 90px 1.2fr 105px':'1.5fr 1.1fr 1.2fr 105px';return(r.candidates||[]).map((c,ci)=>'<div class="candidate" style="grid-template-columns:'+cols+'"><div><label>上游资源</label><select onchange="pickRes('+ri+','+ci+',this.value)">'+resOptions(c.resource_id)+'</select></div><div><label>显示名称</label><input value="'+esc(c.name||'')+'" oninput="EDIT.rules['+ri+'].candidates['+ci+'].name=this.value"></div>'+(f.priority?'<div><label>Priority</label><input type="number" value="'+(c.priority||100)+'" oninput="EDIT.rules['+ri+'].candidates['+ci+'].priority=+this.value||100"></div>':'')+(f.weight?'<div><label>Weight</label><input type="number" min="1" value="'+(c.weight||1)+'" oninput="EDIT.rules['+ri+'].candidates['+ci+'].weight=+this.value||1"></div>':'')+'<div><label>覆盖模型 / alias</label><input value="'+esc(c.override_model||'')+'" placeholder="留空 = 客户端原模型" oninput="EDIT.rules['+ri+'].candidates['+ci+'].override_model=this.value"></div><div><label>状态</label><select onchange="EDIT.rules['+ri+'].candidates['+ci+'].enabled=this.value===\'true\'"><option value="true" '+(c.enabled!==false?'selected':'')+'>启用</option><option value="false" '+(c.enabled===false?'selected':'')+'>停用</option></select><div class="row" style="gap:4px;margin-top:5px"><button onclick="moveCand('+ri+','+ci+',-1)">↑</button><button onclick="moveCand('+ri+','+ci+',1)">↓</button><button onclick="EDIT.rules['+ri+'].candidates.splice('+ci+',1);renderRules()">×</button></div></div></div>').join('')}'''
           s = replace_js_func(s, 'renderCands', 'fromRes', new_render_cands)
-
           new_run_diag = r'''function runDiag(){let d=await api({action:'diagnose',fingerprint:DIAG,model:$('diagModel').value});if(!d.ok){$('diagBody').innerHTML='<div class="note">'+esc(d.error)+'</div>';return}if(!d.matched){$('diagBody').innerHTML='<div class="note">决策：'+esc(d.decision)+'。'+esc(d.note||'')+'</div>';return}let f=strategyFields(d.strategy);let h='<div class="oknote">决策：'+esc(d.decision)+'；Rule：'+esc(d.rule.name)+'；Strategy：'+esc(d.strategy)+'</div><table style="width:100%;margin-top:12px;border-collapse:collapse"><tr><th align=left>#</th><th align=left>候选</th><th align=left>Provider</th>'+(f.priority?'<th align=left>Priority</th>':'')+(f.weight?'<th align=left>Weight</th>':'')+'<th align=left>AuthIndex</th></tr>';for(const c of d.ranked_candidates||[]){h+='<tr><td>'+c.order+'</td><td>'+esc(c.name)+'</td><td>'+esc(c.provider)+'</td>'+(f.priority?'<td>'+c.priority+'</td>':'')+(f.weight?'<td>'+c.weight+'</td>':'')+'<td class="mono">'+esc(c.auth_index)+'</td></tr>'}h+='</table><h3>真实验证</h3><div class="diag">'+esc(d.curl||'')+'</div><div class="muted">执行后到“最近路由记录”查看 KCR_HANDLED / KCR_FALLBACK_TO_CPA / KCR_BYPASS_CPA_DEFAULT。</div>';$('diagBody').innerHTML=h}'''
           s = replace_js_func(s, 'runDiag', 'renderObs', new_run_diag)
           p.write_text(s)
@@ -98,8 +91,7 @@ jobs:
           s = p.read_text()
           old = "return_bytes(out, env_ok({'files':[{'id':'oauth-a','auth_index':'1111222233334444','name':'a@example.com','provider':'codex','status':'active'}]})); return 0"
           new = "return_bytes(out, env_ok({'files':[{'id':'oauth-a','auth_index':'1111222233334444','name':'a@example.com','provider':'codex','status':'active'},{'id':'real-auth-target','auth_index':'9b725f538a48ad68','name':'api@example.com','provider':'codex','status':'active'}]})); return 0"
-          if old not in s:
-              raise SystemExit('host.auth.list ABI fixture not found')
+          if old not in s: raise SystemExit('host.auth.list ABI fixture not found')
           s = s.replace(old, new, 1)
           s = s.replace("'Candidates':[{'id':'auth-target','provider':'codex','auth_index':'9b725f538a48ad68'}]})\n    assert sch['Handled'] is True and sch['AuthID']=='auth-target', sch",
                         "'Candidates':[{'id':'wrong-candidate-id','provider':'codex','auth_index':'9b725f538a48ad68'}]})\n    assert sch['Handled'] is True and sch['AuthID']=='real-auth-target', sch", 1)
@@ -114,13 +106,22 @@ jobs:
           cd src
           go test ./...
           node --check ui.js
-      - name: Commit generated patch
+      - name: Publish verified patch
         shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
-          cd "$GITHUB_WORKSPACE"
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add src/main.go src/ui.js src/abi_smoke.py src/scheduler_auth.go src/scheduler_auth_test.go
-          git diff --cached --check
-          git commit -m 'fix: route scheduler via runtime auth ids [auto-patch]'
-          git push
+          python3 - <<'PY'
+          import base64, json, os, urllib.parse, urllib.request
+          repo = os.environ['GITHUB_REPOSITORY']
+          branch = os.environ['GITHUB_REF_NAME']
+          token = os.environ['GITHUB_TOKEN']
+          headers = {'Authorization': 'Bearer '+token, 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28'}
+          for path in ['src/main.go','src/ui.js','src/abi_smoke.py']:
+              u = f"https://api.github.com/repos/{repo}/contents/{urllib.parse.quote(path)}?ref={urllib.parse.quote(branch)}"
+              req = urllib.request.Request(u, headers=headers)
+              with urllib.request.urlopen(req) as r: meta = json.load(r)
+              body = json.dumps({'message':f'fix: update {path} [auto-patch]','content':base64.b64encode(open(path,'rb').read()).decode(),'sha':meta['sha'],'branch':branch}).encode()
+              req = urllib.request.Request(f"https://api.github.com/repos/{repo}/contents/{urllib.parse.quote(path)}", data=body, headers={**headers,'Content-Type':'application/json'}, method='PUT')
+              with urllib.request.urlopen(req) as r: json.load(r)
+          PY
