@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.6.1 - 2026-09-10
+
+优化 v0.6.0 路由记录管理页的信息密度，不改变路由、Failover 或日志存储语义。
+
+### 路由记录列表
+
+- 将逐条纵向 Card 改为紧凑表格，一行显示一个路由请求。
+- 主列表直接展示时间、Model、Policy / Rule、Strategy、最终候选、Provider、状态、耗时和 Attempts。
+- 正常 `KCR_HANDLED` 不再每行重复显示长决策字符串，改为紧凑的绿色成功状态；Fallback、Bypass 和失败分别使用独立状态样式。
+- Attempts 大于 1 时使用醒目标记，便于快速发现发生过 Failover 的请求。
+- 点击任意请求行即可展开完整详情，包括 Decision、Trace、最终 AuthIndex、候选尝试链和每次选择原因。
+- 桌面端使用紧凑表格与 sticky header；窄屏自动退化为摘要行 + 点击展开详情。
+- 保留 v0.6.0 的统计卡、全文搜索、多条件筛选和 no-policy 丢弃行为。
+
+### 测试
+
+- PR CI 已通过 Go test、Go vet、JavaScript syntax、Linux amd64 c-shared build、ABI smoke、binary inspection 和 artifact packaging。
+
 ## v0.6.0 - 2026-09-10
 
 升级路由可观测性与管理页查询能力，并停止记录与 KCR Policy 无关的请求。
