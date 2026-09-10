@@ -1,8 +1,20 @@
-# CPA Key Chain Router v0.6.1
+# CPA Key Chain Router v0.6.2
 
 CLIProxyAPI（CPA）v7 动态策略路由插件。保留 CPA 原生下游 `api-keys` 认证、usage 和请求监控，仅在认证后根据下游 API Key、模型和策略选择上游 OAuth / API credential。
 
 当前重点兼容：CLIProxyAPI v7.2.154（schema 5）、Linux amd64 / Debian Bookworm 类环境。
+
+## v0.6.2 SQLite 持久化修复
+
+v0.6.2 将 SQLite 从“仅写入归档”升级为管理页真正使用的持久化数据源：
+
+- SQLite 开启且正常运行时，“路由记录”的查询、筛选和统计直接读取数据库。
+- 页面刷新、插件 reconfigure/reload 或 CPA 进程重启后，数据库中的历史路由记录仍然可见。
+- 可观测性页面会显示 SQLite 的运行状态、实际绝对路径、数据库文件大小、Events / Attempts 数量、WAL journal、最后写入时间和最后错误。
+- 数据库打开或写入失败不会影响模型路由；插件会保留路由能力、记录错误，并在查询端回退到 Memory。
+- `routing_events` 新增最终 `error` 字段，旧数据库启动时自动迁移。
+
+数据源规则：**SQLite ON + active → SQLite；否则 → Memory**。因此开启 SQLite 后，路由记录不再受内存 ring buffer 清空影响。
 
 ## v0.6.1 紧凑路由列表
 
@@ -131,7 +143,7 @@ KCR_BYPASS_CPA_DEFAULT   已配置 Policy，但 Rule 未命中或 Rule 明确为
 每次候选尝试 / 每次选择原因 / Failover 原因
 ```
 
-查询 API 使用当前内存 ring buffer 作为数据源，默认最多返回 200 条、上限 1000 条；内存窗口大小仍由“可观测性 → 内存最大记录数”控制。
+查询 API 会根据运行状态选择数据源：SQLite 开启且 active 时直接读取持久化数据库；否则使用当前内存 ring buffer。默认最多返回 200 条、上限 1000 条。
 
 CPA 日志默认写入 `kcr routing decision`，包含 decision、rule、strategy、provider、auth_index、attempts、duration_ms、reason 和 selection_reasons。
 
@@ -207,7 +219,7 @@ checksums.txt
 将 Release 中：
 
 ```text
-key-chain-router-v0.6.1.so
+key-chain-router-v0.6.2.so
 ```
 
 放入：

@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.6.2 - 2026-09-10
+
+修复 SQLite “只写不读”的持久化缺口，使路由记录在页面刷新、插件重载和 CPA 重启后仍可查询。
+
+### SQLite 持久化查询
+
+- SQLite 开启且 active 时，管理页 `events` 查询直接读取 SQLite，而不是只读取进程内 `v4Runtime.recent`。
+- 数据库查询完整支持现有全文搜索、Decision、成功/失败、Policy、Strategy、Provider、Model、HTTP 状态、时间范围和返回上限。
+- 统计卡、P95 和筛选 facets 在 SQLite 模式下同样基于持久化数据计算。
+- `routing_events` 新增 `error` 字段并自动迁移旧数据库，最终错误信息也可跨重启查看。
+
+### SQLite 健康状态
+
+- 管理页显示 SQLite 是否运行、实际绝对路径、文件大小、Events / Attempts 行数、journal mode、最后写入/最后持久化时间和最后错误。
+- writer INSERT 错误不再静默吞掉，会记录到健康状态并写 CPA host error log。
+- SQLite 打开失败不再导致 plugin register/reconfigure 失败；路由继续工作并自动回退到 Memory 查询，同时暴露数据库错误。
+
+### 测试
+
+- 新增持久化回归测试：Memory 为空但 SQLite 中存在事件时，路由记录仍能返回 event、attempts 和 selection reasons。
+- PR CI 已通过 Go test、Go vet、JavaScript syntax、Linux amd64 c-shared build、ABI smoke、binary inspection 和 artifact packaging。
+
 ## v0.6.1 - 2026-09-10
 
 优化 v0.6.0 路由记录管理页的信息密度，不改变路由、Failover 或日志存储语义。
