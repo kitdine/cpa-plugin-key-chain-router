@@ -65,7 +65,7 @@ jobs:
           mkdir -p artifacts
           cp "/tmp/${NAME}" "artifacts/${NAME}"
           sha256sum "artifacts/${NAME}" > "artifacts/${NAME}.sha256"
-          git add "artifacts/${NAME}" "artifacts/${NAME}.sha256"
+          git add -f "artifacts/${NAME}" "artifacts/${NAME}.sha256"
           if git diff --cached --quiet; then
             echo "artifact already published"
           else
