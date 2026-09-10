@@ -1,10 +1,32 @@
-# CPA Key Chain Router v0.4.0
+# CPA Key Chain Router v0.5.0
 
 CLIProxyAPI（CPA）v7 动态策略路由插件。保留 CPA 原生下游 `api-keys` 认证、usage 和请求监控，仅在认证后根据下游 API Key、模型和策略选择上游 OAuth / API credential。
 
 当前重点兼容：CLIProxyAPI v7.2.154（schema 5）、Linux amd64 / Debian Bookworm 类环境。
 
-## v0.4.0 核心模型
+## v0.5.0 关键修复
+
+v0.5.0 修复 v0.4.0 中 scheduler 将候选 `ID` 误当作真实 `AuthID` 的问题。现在实际调度路径为：
+
+```text
+Policy Candidate AuthIndex
+  → X-CPA-Key-Chain-Ticket
+  → scheduler.pick
+  → host.auth.list
+  → 按 AuthIndex 找到当前真实 files[].id
+  → 返回 AuthID
+```
+
+`AuthIndex` 继续作为 KCR state 中的稳定定位字段；运行时 `AuthID` 始终从 CPA 当前 `host.auth.list` 解析，不再从 scheduler Candidates 推断。若无法唯一解析，scheduler fail closed，不会静默让 CPA 默认 scheduler 改选其他 credential。
+
+管理 UI 也会根据 Strategy 只展示有效字段：
+
+- `ordered-failover` / `round-robin`：隐藏 Priority、Weight。
+- `weighted-round-robin`：仅显示 Weight。
+- `priority-weighted` / `sticky`：显示 Priority、Weight。
+- `cpa-default`：无候选字段。
+
+## Policy / Rule 模型
 
 一个下游 API Key **只能对应一个 Policy**：
 
@@ -64,7 +86,7 @@ Override Model 留空时继承客户端原始 model；填写时仅该候选覆�
 
 ## 明确知道“插件是否生效”
 
-v0.4 把路由决策变成一等事件，每次请求只会显示三种决策之一：
+每次请求只会显示三种决策之一：
 
 ```text
 KCR_HANDLED              插件接管并按 Policy/Rule 执行
@@ -91,7 +113,7 @@ X-KCR-Trace-ID
 X-KCR-Rule
 ```
 
-不会返回 API secret / OAuth token。内部精确 AuthIndex 选择仍使用当前 CPA 能力下的一次性 `X-CPA-Key-Chain-Ticket` 调度票据；票据由 scheduler 单次消费。
+不会返回 API secret / OAuth token。内部精确 credential 选择使用一次性 `X-CPA-Key-Chain-Ticket`；票据由 scheduler 单次消费，并通过 `host.auth.list` 将稳定 `AuthIndex` 解析为当前真实 `AuthID`。
 
 ## 可观测性
 
@@ -153,7 +175,7 @@ checksums.txt
 将 Release 中：
 
 ```text
-key-chain-router-v0.4.0.so
+key-chain-router-v0.5.0.so
 ```
 
 放入：
