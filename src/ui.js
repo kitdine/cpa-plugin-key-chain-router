@@ -314,6 +314,28 @@ function renderObs() {
   $('oRetention').value = o.sqlite_retention_days || 30;
   $('oMaxRows').value = o.sqlite_max_rows || 100000;
   $('oHeaders').value = String(!!o.response_headers);
+  const h = SNAP.sqlite_status || {};
+  const health = $('sqliteHealth');
+  if (health) {
+    if (!o.sqlite_enabled) {
+      health.innerHTML = '<div class="muted small">SQLite 当前未开启。</div>';
+    } else {
+      const cls = h.active ? 'oknote' : 'note';
+      const size = Number(h.file_size || 0);
+      const sizeText = size >= 1048576 ? (size / 1048576).toFixed(2) + ' MB' : size >= 1024 ? (size / 1024).toFixed(1) + ' KB' : size + ' B';
+      const bits = [
+        '数据库：' + (h.path || o.sqlite_path || '-'),
+        '文件：' + (h.file_exists ? sizeText : '尚未创建'),
+        'Events：' + (h.events || 0),
+        'Attempts：' + (h.attempts || 0),
+        h.journal_mode ? 'Journal：' + h.journal_mode : '',
+        h.last_write_at ? '最后写入：' + h.last_write_at : '最后写入：暂无'
+      ].filter(Boolean);
+      health.innerHTML = '<div class="' + cls + '"><b>SQLite ' + (h.active ? '运行中' : '未运行') + '</b><div class="small" style="margin-top:5px;word-break:break-all">' + esc(bits.join(' · ')) + '</div>' +
+        (h.last_error ? '<div class="red small" style="margin-top:5px">最后错误：' + esc(h.last_error) + (h.last_error_at ? ' · ' + esc(h.last_error_at) : '') + '</div>' : '') +
+        (h.probe_error ? '<div class="red small" style="margin-top:5px">健康检查：' + esc(h.probe_error) + '</div>' : '') + '</div>';
+    }
+  }
 }
 
 async function saveObs() {
@@ -478,9 +500,13 @@ function renderEventDetail(e) {
 function renderEvents() {
   if (!EVENT_DATA) return;
   const xs = EVENT_DATA.events || [];
-  const meta = '当前内存窗口 ' + (EVENT_DATA.window_total || 0) + ' 条 · 匹配 ' + (EVENT_DATA.matched || 0) +
-    ' 条 · 返回 ' + (EVENT_DATA.returned || 0) + ' 条 · 内存上限 ' + (EVENT_DATA.memory_limit || 0) +
-    (EVENT_DATA.memory_on ? '' : '（内存记录已关闭）');
+  const source = EVENT_DATA.source === 'sqlite' ? 'SQLite' : 'Memory';
+  const health = EVENT_DATA.sqlite_status || {};
+  const window = source === 'SQLite' ? '数据库记录 ' : '当前内存窗口 ';
+  let meta = '数据源 ' + source + ' · ' + window + (EVENT_DATA.window_total || 0) + ' 条 · 匹配 ' + (EVENT_DATA.matched || 0) +
+    ' 条 · 返回 ' + (EVENT_DATA.returned || 0) + ' 条';
+  if (source === 'Memory') meta += ' · 内存上限 ' + (EVENT_DATA.memory_limit || 0) + (EVENT_DATA.memory_on ? '' : '（内存记录已关闭）');
+  if (health.last_error) meta += ' · SQLite 异常：' + health.last_error;
   $('eventResultMeta').textContent = meta;
 
   if (!xs.length) {

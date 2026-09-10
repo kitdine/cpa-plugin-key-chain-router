@@ -295,6 +295,7 @@ func restartSQLiteSinkV4() error {
 		old.close()
 	}
 	if !o.SQLiteEnabled {
+		resetSQLiteHealthV62()
 		return nil
 	}
 	runtimeState.RLock()
@@ -306,8 +307,10 @@ func restartSQLiteSinkV4() error {
 	}
 	sink, err := newSQLiteSinkV4(path, o)
 	if err != nil {
+		recordSQLiteOpenErrorV62(err)
 		return err
 	}
+	recordSQLiteOpenV62(path)
 	v4Runtime.Lock()
 	v4Runtime.sqlite = sink
 	v4Runtime.Unlock()
@@ -366,7 +369,8 @@ func newSQLiteSinkV4(path string, cfg ObservabilityConfig) (*sqliteSink, error) 
 		auth_index TEXT,
 		status INTEGER,
 		duration_ms INTEGER,
-		success INTEGER
+		success INTEGER,
+		error TEXT
 	);
 	CREATE TABLE IF NOT EXISTS routing_attempts (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -390,6 +394,7 @@ func newSQLiteSinkV4(path string, cfg ObservabilityConfig) (*sqliteSink, error) 
 	// Existing v0.4/v0.5 databases do not have selection_reasons.
 	// SQLite lacks ADD COLUMN IF NOT EXISTS, so duplicate-column is intentionally ignored.
 	_, _ = db.Exec(`ALTER TABLE routing_events ADD COLUMN selection_reasons TEXT`)
+	_, _ = db.Exec(`ALTER TABLE routing_events ADD COLUMN error TEXT`)
 
 	// v0.6 deliberately stops retaining requests from API keys with no configured Policy.
 	// Purge historical rows with that old reason as well.
@@ -427,7 +432,7 @@ func (s *sqliteSink) loop() {
 	for {
 		select {
 		case ev := <-s.ch:
-			_ = s.insert(ev)
+			recordSQLiteWriteV62(s.insert(ev))
 			count++
 			if count%100 == 0 {
 				s.cleanup()
@@ -438,7 +443,7 @@ func (s *sqliteSink) loop() {
 			for {
 				select {
 				case ev := <-s.ch:
-					_ = s.insert(ev)
+					recordSQLiteWriteV62(s.insert(ev))
 				default:
 					s.cleanup()
 					return
@@ -462,8 +467,8 @@ func (s *sqliteSink) insert(ev RoutingEvent) error {
 
 	reasonsJSON, _ := json.Marshal(ev.SelectionReasons)
 	_, err = tx.Exec(
-		`INSERT OR REPLACE INTO routing_events(trace_id,at,decision,reason,selection_reasons,policy_name,key_fingerprint,key_hint,rule_id,rule_name,strategy,model,stream,final_resource,provider,auth_index,status,duration_ms,success) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		ev.TraceID, ev.At, ev.Decision, ev.Reason, string(reasonsJSON), ev.PolicyName, ev.KeyFingerprint, ev.KeyHint, ev.RuleID, ev.RuleName, ev.Strategy, ev.Model, boolIntV4(ev.Stream), ev.Final, ev.Provider, ev.AuthIndex, ev.Status, ev.DurationMs, boolIntV4(ev.Success),
+		`INSERT OR REPLACE INTO routing_events(trace_id,at,decision,reason,selection_reasons,policy_name,key_fingerprint,key_hint,rule_id,rule_name,strategy,model,stream,final_resource,provider,auth_index,status,duration_ms,success,error) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		ev.TraceID, ev.At, ev.Decision, ev.Reason, string(reasonsJSON), ev.PolicyName, ev.KeyFingerprint, ev.KeyHint, ev.RuleID, ev.RuleName, ev.Strategy, ev.Model, boolIntV4(ev.Stream), ev.Final, ev.Provider, ev.AuthIndex, ev.Status, ev.DurationMs, boolIntV4(ev.Success), ev.Error,
 	)
 	if err != nil {
 		return err
