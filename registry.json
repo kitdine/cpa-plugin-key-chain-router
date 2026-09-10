@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "plugins": [
     {
       "id": "key-chain-router",
@@ -12,7 +12,16 @@
       "license": "MIT",
       "tags": ["routing", "policy", "failover", "round-robin", "weighted", "sticky", "api-key", "oauth", "provider", "observability"],
       "install": {
-        "type": "github-release"
+        "type": "direct",
+        "artifacts": [
+          {
+            "goos": "linux",
+            "goarch": "amd64",
+            "url": "https://raw.githubusercontent.com/kitdine/cpa-plugin-key-chain-router/plugin-store-artifacts/artifacts/key-chain-router_0.4.0_linux_amd64.zip",
+            "sha256": "c1c06e0164052b18597a4187865f8ad0b205debe28670050e9e6c6ebb6c0c272",
+            "size": 2863668
+          }
+        ]
       }
     }
   ]
