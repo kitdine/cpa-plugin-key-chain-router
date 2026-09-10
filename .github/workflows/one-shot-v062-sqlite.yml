@@ -31,7 +31,7 @@ jobs:
           git diff --check
           grep -q 'queryEventsSQLiteV62' src/v062_sqlite_query.go
           grep -q 'sqlite_status' src/v4_management.go
-          grep -q 'SQLite 运行中' src/ui.js
+          grep -q 'sqliteHealth' src/ui.js
 
       - name: Commit generated source
         run: |
