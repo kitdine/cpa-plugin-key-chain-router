@@ -40,7 +40,7 @@ def host_call(ctx, method, req, n, out):
     raw=bytes((c_uint8*n).from_address(addressof(req.contents))) if req and n else b'{}'
     payload=json.loads(raw or b'{}')
     if m=='host.auth.list':
-        return_bytes(out, env_ok({'files':[{'id':'oauth-a','auth_index':'1111222233334444','name':'a@example.com','provider':'codex','status':'active'}]})); return 0
+        return_bytes(out, env_ok({'files':[{'id':'oauth-a','auth_index':'1111222233334444','name':'a@example.com','provider':'codex','status':'active'},{'id':'real-auth-target','auth_index':'9b725f538a48ad68','name':'api@example.com','provider':'codex','status':'active'}]})); return 0
     if m=='host.log':
         logs.append(payload)
         return_bytes(out, env_ok({})); return 0
@@ -141,9 +141,9 @@ with tempfile.TemporaryDirectory() as td:
     assert not any(k.lower().startswith('x-kcr-') for k in (ex.get('Headers') or {}).keys())
 
     first_ticket=captured_ticket
-    sch=pcall('scheduler.pick',{'Provider':'codex','Model':'gpt-anything','Options':{'Headers':{'X-CPA-Key-Chain-Ticket':[first_ticket]}},'Candidates':[{'id':'auth-target','provider':'codex','auth_index':'9b725f538a48ad68'}]})
-    assert sch['Handled'] is True and sch['AuthID']=='auth-target', sch
-    sch2=pcall('scheduler.pick',{'Provider':'codex','Model':'gpt-anything','Options':{'Headers':{'X-CPA-Key-Chain-Ticket':[first_ticket]}},'Candidates':[{'id':'auth-target','provider':'codex','auth_index':'9b725f538a48ad68'}]})
+    sch=pcall('scheduler.pick',{'Provider':'codex','Model':'gpt-anything','Options':{'Headers':{'X-CPA-Key-Chain-Ticket':[first_ticket]}},'Candidates':[{'id':'wrong-candidate-id','provider':'codex','auth_index':'9b725f538a48ad68'}]})
+    assert sch['Handled'] is True and sch['AuthID']=='real-auth-target', sch
+    sch2=pcall('scheduler.pick',{'Provider':'codex','Model':'gpt-anything','Options':{'Headers':{'X-CPA-Key-Chain-Ticket':[first_ticket]}},'Candidates':[{'id':'wrong-candidate-id','provider':'codex','auth_index':'9b725f538a48ad68'}]})
     assert sch2['Handled'] is False, sch2
 
     diag=pcall('management.handle',{'Method':'GET','Path':'/v0/resource/plugins/key-chain-router/api','Query':{'action':['diagnose'],'fingerprint':[fp],'model':['gpt-anything']},'Headers':{},'Body':''})
