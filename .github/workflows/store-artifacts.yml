@@ -1,0 +1,74 @@
+name: Publish Plugin Store Artifact
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version without leading v
+        required: true
+        type: string
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    if: github.event_name != 'push' || startsWith(github.event.head_commit.message, 'store-sync:')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" == "release" ]]; then
+            VERSION="${{ github.event.release.tag_name }}"
+            VERSION="${VERSION#v}"
+          elif [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION="$(tr -d '[:space:]' < VERSION)"
+          fi
+          test -n "$VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Download store archive from release
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          NAME="key-chain-router_${VERSION}_linux_amd64.zip"
+          URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/v${VERSION}/${NAME}"
+          curl -fL --retry 3 --retry-delay 2 "$URL" -o "/tmp/${NAME}"
+          sha256sum "/tmp/${NAME}"
+
+      - name: Publish to plugin-store-artifacts branch
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          NAME="key-chain-router_${VERSION}_linux_amd64.zip"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch origin plugin-store-artifacts
+          git switch plugin-store-artifacts
+          mkdir -p artifacts
+          cp "/tmp/${NAME}" "artifacts/${NAME}"
+          sha256sum "artifacts/${NAME}" > "artifacts/${NAME}.sha256"
+          git add "artifacts/${NAME}" "artifacts/${NAME}.sha256"
+          if git diff --cached --quiet; then
+            echo "artifact already published"
+          else
+            git commit -m "store: publish ${VERSION}"
+            git push origin HEAD:plugin-store-artifacts
+          fi
