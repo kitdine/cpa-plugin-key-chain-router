@@ -1,5 +1,36 @@
 # Changelog
 
+## v0.6.0 - 2026-09-10
+
+升级路由可观测性与管理页查询能力，并停止记录与 KCR Policy 无关的请求。
+
+### 路由记录
+
+- 未配置 KCR Policy 的 API Key 请求不再进入内存 ring buffer、不写 SQLite、不写 `kcr routing decision` host log，也不在管理页显示。
+- SQLite 启动时自动清理历史 `reason=no_policy` 事件及对应 attempts。
+- 已配置但停用 Policy、已配置 Policy 但 model 未命中 Rule、显式 `cpa-default` 等有诊断价值的情况继续保留。
+- 每个 routing event 新增 `selection_reasons`，与 attempts 一一对应，解释每次为什么选择该候选。
+- 首选原因覆盖 ordered failover、round robin、Smooth Weighted Round Robin、Priority Weighted 和 Sticky Weighted Rendezvous Hash。
+- 后续候选说明上一候选状态以及 `next`、`same-priority-first`、`next-priority`、`cpa-default` 等 Failover 动作。
+
+### 查询与统计
+
+- 新增路由事件查询 API，支持全文搜索。
+- 支持按 Decision、成功/失败、Policy、Strategy、Provider、Model、HTTP 状态分组和时间窗口筛选。
+- 支持 100 / 200 / 500 / 1000 条返回上限。
+- 新增统计信息：匹配请求数、成功率、平均耗时、P95、Fallback 数、平均尝试次数。
+- 管理页将原“最近路由记录”升级为“路由记录”，增加筛选器、统计卡、结果计数和逐 attempt 详情。
+
+### SQLite 兼容
+
+- `routing_events` 增加 `selection_reasons` JSON 字段。
+- v0.4/v0.5 已存在的 SQLite 数据库通过启动迁移自动增加字段，无需重建数据库。
+
+### 测试
+
+- 新增 no-policy 丢弃、disabled Policy 保留、selection reasons 和日志筛选/统计单测。
+- PR CI 已通过 Go test、Go vet、JavaScript syntax、Linux amd64 c-shared build、ABI smoke、binary inspection 和 artifact packaging。
+
 ## v0.5.0 - 2026-09-10
 
 修复 v0.4.0 的 credential 调度错误，并收紧策略配置界面的字段展示。
