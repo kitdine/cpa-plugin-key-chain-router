@@ -308,7 +308,8 @@ func restartSQLiteSinkV4() error {
 	sink, err := newSQLiteSinkV4(path, o)
 	if err != nil {
 		recordSQLiteOpenErrorV62(err)
-		return err
+		_, _ = callHost("host.log", map[string]any{"level": "error", "message": "kcr sqlite open failed; continuing with memory observability", "fields": map[string]any{"path": path, "error": err.Error()}})
+		return nil
 	}
 	recordSQLiteOpenV62(path)
 	v4Runtime.Lock()

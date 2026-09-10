@@ -34,7 +34,7 @@ func recordSQLiteOpenV62(path string) {
     sqliteHealthV62.LastError = ""
     sqliteHealthV62.LastErrorAt = ""
     sqliteHealthV62.Unlock()
-    _, _ = path, time.Now()
+    _ = path
 }
 
 func recordSQLiteOpenErrorV62(err error) {
@@ -144,6 +144,10 @@ func sqliteStatusV62() map[string]any {
         out["probe_error"] = err.Error()
     } else {
         out["attempts"] = attempts
+    }
+    var lastPersisted string
+    if err := sink.db.QueryRow(`SELECT COALESCE(MAX(at),'') FROM routing_events`).Scan(&lastPersisted); err == nil {
+        out["last_persisted_at"] = lastPersisted
     }
     var journal string
     if err := sink.db.QueryRow(`PRAGMA journal_mode`).Scan(&journal); err == nil {

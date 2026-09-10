@@ -329,7 +329,7 @@ function renderObs() {
         'Events：' + (h.events || 0),
         'Attempts：' + (h.attempts || 0),
         h.journal_mode ? 'Journal：' + h.journal_mode : '',
-        h.last_write_at ? '最后写入：' + h.last_write_at : '最后写入：暂无'
+        (h.last_write_at || h.last_persisted_at) ? '最后写入：' + (h.last_write_at || h.last_persisted_at) : '最后写入：暂无'
       ].filter(Boolean);
       health.innerHTML = '<div class="' + cls + '"><b>SQLite ' + (h.active ? '运行中' : '未运行') + '</b><div class="small" style="margin-top:5px;word-break:break-all">' + esc(bits.join(' · ')) + '</div>' +
         (h.last_error ? '<div class="red small" style="margin-top:5px">最后错误：' + esc(h.last_error) + (h.last_error_at ? ' · ' + esc(h.last_error_at) : '') + '</div>' : '') +
