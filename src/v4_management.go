@@ -145,6 +145,7 @@ func buildSnapshotV4() map[string]any {
 		"resources":       resources,
 		"policies":        policies,
 		"observability":   st.Observability,
+		"sqlite_status":   sqliteStatusV62(),
 		"recent_events":   recent,
 	}
 }
@@ -161,6 +162,9 @@ func visibleRecentEventsV6(events []RoutingEvent) []RoutingEvent {
 }
 
 func queryEventsV4(q url.Values) map[string]any {
+	if out, ok := queryEventsSQLiteV62(q); ok {
+		return out
+	}
 	v4Runtime.RLock()
 	recent := append([]RoutingEvent(nil), v4Runtime.recent...)
 	obs := normalizeObservability(v4Runtime.state.Observability)
@@ -278,6 +282,7 @@ func queryEventsV4(q url.Values) map[string]any {
 			"models":     sortedFacetV6(facetModels),
 		},
 		"events": events,
+		"sqlite_status": sqliteStatusV62(),
 	}
 }
 
