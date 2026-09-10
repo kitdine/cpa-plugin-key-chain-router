@@ -2,6 +2,7 @@ let SNAP = null;
 let EDIT = null;
 let DIAG = null;
 let EVENT_DATA = null;
+let EVENT_EXPANDED = new Set();
 
 const $ = (id) => document.getElementById(id);
 
@@ -431,6 +432,49 @@ function renderAttempt(e, a, i) {
     (a.error ? '<div class="red small" style="margin-top:4px">' + esc(a.error) + '</div>' : '') + '</div>';
 }
 
+function fmtEventTime(at) {
+  if (!at) return '-';
+  const s = String(at);
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}:\d{2}:\d{2})/);
+  return m ? m[2] + '-' + m[3] + ' ' + m[4] : s;
+}
+
+function eventState(e) {
+  if (e.success === false) return { cls: 'event-state-error', label: '失败' };
+  if (e.decision === 'KCR_FALLBACK_TO_CPA') return { cls: 'event-state-fallback', label: 'Fallback' };
+  if (e.decision === 'KCR_BYPASS_CPA_DEFAULT') return { cls: 'event-state-bypass', label: 'Bypass' };
+  return { cls: 'event-state-ok', label: '成功' };
+}
+
+function eventStatusText(e) {
+  if (e.status) return String(e.status);
+  if (e.success === false) return 'ERR';
+  return '-';
+}
+
+function toggleEvent(traceID) {
+  if (!traceID) return;
+  if (EVENT_EXPANDED.has(traceID)) EVENT_EXPANDED.delete(traceID);
+  else EVENT_EXPANDED.add(traceID);
+  renderEvents();
+}
+
+function renderEventDetail(e) {
+  const eventReason = reasonLabel(e.reason);
+  const details = [
+    e.decision ? 'Decision ' + e.decision : '',
+    e.auth_index ? '最终 AuthIndex ' + e.auth_index : '',
+    e.key_hint ? 'API Key ' + e.key_hint : '',
+    e.trace_id ? 'Trace ' + e.trace_id : ''
+  ].filter(Boolean).join(' · ');
+  return '<div class="event-detail">' +
+    (eventReason ? '<div class="event-detail-reason"><b>路由结果：</b>' + esc(eventReason) + '</div>' : '') +
+    '<div class="muted small event-detail-meta">' + esc(details) + '</div>' +
+    '<div class="event-detail-title">候选尝试</div>' +
+    '<div class="attempts">' + ((e.attempts || []).length ? (e.attempts || []).map((a, i) => renderAttempt(e, a, i)).join('') : '<div class="muted small">没有候选尝试记录</div>') + '</div>' +
+    '</div>';
+}
+
 function renderEvents() {
   if (!EVENT_DATA) return;
   const xs = EVENT_DATA.events || [];
@@ -438,20 +482,39 @@ function renderEvents() {
     ' 条 · 返回 ' + (EVENT_DATA.returned || 0) + ' 条 · 内存上限 ' + (EVENT_DATA.memory_limit || 0) +
     (EVENT_DATA.memory_on ? '' : '（内存记录已关闭）');
   $('eventResultMeta').textContent = meta;
-  const h = xs.map((e) => {
-    const decisionClass = e.decision === 'KCR_HANDLED' ? 'green' : e.decision === 'KCR_FALLBACK_TO_CPA' ? 'warn' : 'muted';
-    const eventReason = reasonLabel(e.reason);
-    const finalBits = [e.final ? '最终 ' + e.final : '', e.provider ? 'Provider ' + e.provider : '',
-      e.auth_index ? 'AuthIndex ' + e.auth_index : '', e.status ? 'HTTP ' + e.status : '',
-      Number.isFinite(Number(e.duration_ms)) ? e.duration_ms + ' ms' : ''].filter(Boolean).join(' · ');
-    return '<div class="event"><div class="row"><span class="decision ' + decisionClass + '">' + esc(e.decision) + '</span>' +
-      '<span><b>' + esc(e.model || '-') + '</b></span><span class="badge">' + esc(e.rule_name || '-') + '</span>' +
-      '<span class="muted">' + esc(e.policy_name || '-') + '</span><span class="grow"></span><span class="muted small">' + esc(e.at) + '</span></div>' +
-      '<div class="event-meta muted small">Strategy ' + esc(e.strategy || '-') + ' · ' + esc(finalBits || '未产生最终候选') + '</div>' +
-      (eventReason ? '<div class="event-reason"><b>路由结果原因：</b>' + esc(eventReason) + '</div>' : '') +
-      '<div class="attempts">' + (e.attempts || []).map((a, i) => renderAttempt(e, a, i)).join('') + '</div></div>';
+
+  if (!xs.length) {
+    $('events').innerHTML = '<div class="muted" style="padding:18px 0">当前条件下暂无路由记录</div>';
+    return;
+  }
+
+  const rows = xs.map((e) => {
+    const key = e.trace_id || e.at;
+    const expanded = EVENT_EXPANDED.has(key);
+    const state = eventState(e);
+    const attempts = (e.attempts || []).length;
+    const policyRule = '<div class="event-primary">' + esc(e.policy_name || '-') + '</div>' +
+      '<div class="muted small ellipsis">' + esc(e.rule_name || '-') + '</div>';
+    const final = e.final || (e.decision === 'KCR_FALLBACK_TO_CPA' ? 'CPA Default' : '-');
+    const row = '<tr class="event-row ' + (expanded ? 'expanded' : '') + '" onclick="toggleEvent(\'' + esc(key) + '\')" title="点击查看路由详情">' +
+      '<td class="event-toggle"><span class="chevron">' + (expanded ? '▾' : '›') + '</span></td>' +
+      '<td class="event-time mono" title="' + esc(e.at || '') + '">' + esc(fmtEventTime(e.at)) + '</td>' +
+      '<td><div class="event-primary ellipsis" title="' + esc(e.model || '') + '">' + esc(e.model || '-') + '</div></td>' +
+      '<td>' + policyRule + '</td>' +
+      '<td><span class="strategy-chip" title="' + esc(e.strategy || '') + '">' + esc(e.strategy || '-') + '</span></td>' +
+      '<td><div class="event-primary ellipsis" title="' + esc(final) + '">' + esc(final) + '</div></td>' +
+      '<td><span class="ellipsis" title="' + esc(e.provider || '') + '">' + esc(e.provider || '-') + '</span></td>' +
+      '<td><span class="event-state ' + state.cls + '"><i></i>' + esc(state.label) + '</span><span class="http-code">' + esc(eventStatusText(e)) + '</span></td>' +
+      '<td class="event-duration">' + esc(Number.isFinite(Number(e.duration_ms)) ? e.duration_ms + ' ms' : '-') + '</td>' +
+      '<td class="event-attempt-count"><span class="attempt-count ' + (attempts > 1 ? 'multi' : '') + '">' + attempts + '</span></td>' +
+      '</tr>';
+    const detail = expanded ? '<tr class="event-detail-row"><td colspan="10">' + renderEventDetail(e) + '</td></tr>' : '';
+    return row + detail;
   }).join('');
-  $('events').innerHTML = h || '<div class="muted" style="padding:18px 0">当前条件下暂无路由记录</div>';
+
+  $('events').innerHTML = '<div class="event-table-wrap"><table class="event-table"><thead><tr>' +
+    '<th></th><th>时间</th><th>Model</th><th>Policy / Rule</th><th>Strategy</th><th>最终候选</th><th>Provider</th><th>状态</th><th>耗时</th><th>Attempts</th>' +
+    '</tr></thead><tbody>' + rows + '</tbody></table></div>';
 }
 
 load().catch((e) => $('env').innerHTML = '<div class="note">加载失败：' + esc(e.message || e) + '</div>');
