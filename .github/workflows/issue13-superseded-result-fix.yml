@@ -25,7 +25,9 @@ jobs:
           ref: fix/issue-13-health-aware-failback
           fetch-depth: 0
       - name: Apply patch
-        run: python3 scripts/issue13_superseded_result_patch.py
+        run: |
+          sed -i "0,/ts += r'''/s//ts += '''/" scripts/issue13_superseded_result_patch.py
+          python3 scripts/issue13_superseded_result_patch.py
       - name: Format and test
         run: |
           gofmt -w src/v4_health.go src/issue13_health_test.go
