@@ -12,6 +12,12 @@ func issue13Fixture() (*Policy, *PolicyRule, []*PolicyCandidate) {
 	b := &PolicyCandidate{ID: "b", Name: "B", Provider: "codex", AuthIndex: "idx-b", Enabled: true, Priority: 90, Weight: 1}
 	r := &PolicyRule{ID: "r1", Name: "rule", Strategy: strategyOrdered, Candidates: []*PolicyCandidate{a, b}, Failover: defaultFailover()}
 	p := &Policy{Name: "policy", KeyFingerprint: "fp", Enabled: true, Rules: []*PolicyRule{r}}
+	v4Runtime.Lock()
+	if v4Runtime.state.Policies == nil {
+		v4Runtime.state.Policies = map[string]*Policy{}
+	}
+	v4Runtime.state.Policies[p.KeyFingerprint] = clonePolicyV4(p)
+	v4Runtime.Unlock()
 	return p, r, []*PolicyCandidate{a, b}
 }
 
@@ -19,11 +25,13 @@ func resetIssue13Health(t *testing.T) {
 	t.Helper()
 	v4Runtime.Lock()
 	old := v4Runtime.health
+	oldState := cloneV4State(v4Runtime.state)
 	v4Runtime.health = map[string]*candidateHealthState{}
 	v4Runtime.Unlock()
 	t.Cleanup(func() {
 		v4Runtime.Lock()
 		v4Runtime.health = old
+		v4Runtime.state = oldState
 		v4Runtime.Unlock()
 	})
 }
@@ -410,5 +418,44 @@ func TestIssue13MaterialCandidateConfigChangeResetsHealth(t *testing.T) {
 	v4Runtime.Unlock()
 	if stillPresent {
 		t.Fatal("material candidate config change retained stale health state")
+	}
+}
+
+func TestIssue13SupersededCandidateResultsCannotRecreateHealth(t *testing.T) {
+	resetIssue13Health(t)
+	p, r, ranked := issue13Fixture()
+	oldCandidate := ranked[0]
+	key := candidateHealthKeyV4(p, r, oldCandidate)
+
+	recordCandidateFailureV4(p, r, oldCandidate, 503, nil, nil)
+	changed := clonePolicyV4(p)
+	changed.Rules[0].Candidates[0].OverrideModel = "fixed-model"
+	v4Runtime.Lock()
+	resetChangedCandidateHealthLockedV4(v4Runtime.state.Policies[p.KeyFingerprint], changed)
+	v4Runtime.state.Policies[p.KeyFingerprint] = clonePolicyV4(changed)
+	_, presentAfterSave := v4Runtime.health[key]
+	v4Runtime.Unlock()
+	if presentAfterSave {
+		t.Fatal("material config save retained old candidate health")
+	}
+
+	recordCandidateFailureV4(p, r, oldCandidate, 503, nil, nil)
+	recordCandidateSuccessV4(p, r, oldCandidate, false)
+	releaseCandidateProbeV4(p, r, oldCandidate, true)
+	v4Runtime.RLock()
+	_, recreated := v4Runtime.health[key]
+	v4Runtime.RUnlock()
+	if recreated {
+		t.Fatal("superseded candidate result recreated health for replacement config")
+	}
+
+	currentRule := changed.Rules[0]
+	currentCandidate := currentRule.Candidates[0]
+	recordCandidateFailureV4(changed, currentRule, currentCandidate, 503, nil, nil)
+	v4Runtime.RLock()
+	current := v4Runtime.health[key]
+	v4Runtime.RUnlock()
+	if current == nil || current.State != healthOpen {
+		t.Fatalf("current replacement candidate failure was ignored: %#v", current)
 	}
 }

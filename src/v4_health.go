@@ -101,6 +101,10 @@ func candidateWouldBeSelectableV4(p *Policy, r *PolicyRule, c *PolicyCandidate, 
 		return true
 	}
 	v4Runtime.RLock()
+	if !candidateHealthConfigCurrentLockedV4(p, r, c) {
+		v4Runtime.RUnlock()
+		return true
+	}
 	h := v4Runtime.health[key]
 	if h == nil || h.State == "" || h.State == healthClosed {
 		v4Runtime.RUnlock()
@@ -126,6 +130,9 @@ func acquireCandidateHealthV4(p *Policy, r *PolicyRule, c *PolicyCandidate, now 
 	}
 	v4Runtime.Lock()
 	defer v4Runtime.Unlock()
+	if !candidateHealthConfigCurrentLockedV4(p, r, c) {
+		return true, false
+	}
 	h := candidateHealthStateLockedV4(key)
 	if h.State == healthClosed {
 		return true, false
@@ -247,6 +254,9 @@ func recordCandidateFailureV4(p *Policy, r *PolicyRule, c *PolicyCandidate, stat
 	now := time.Now()
 	v4Runtime.Lock()
 	defer v4Runtime.Unlock()
+	if !candidateHealthConfigCurrentLockedV4(p, r, c) {
+		return
+	}
 	h := candidateHealthStateLockedV4(key)
 	isProbe := len(probeAttempt) > 0 && probeAttempt[0]
 	level := h.BackoffLevel
@@ -318,6 +328,9 @@ func recordCandidateSuccessV4(p *Policy, r *PolicyRule, c *PolicyCandidate, prob
 	now := time.Now()
 	v4Runtime.Lock()
 	defer v4Runtime.Unlock()
+	if !candidateHealthConfigCurrentLockedV4(p, r, c) {
+		return
+	}
 	h := candidateHealthStateLockedV4(key)
 	h.LastSuccessAt = now
 
@@ -355,6 +368,9 @@ func releaseCandidateProbeV4(p *Policy, r *PolicyRule, c *PolicyCandidate, owned
 	}
 	v4Runtime.Lock()
 	defer v4Runtime.Unlock()
+	if !candidateHealthConfigCurrentLockedV4(p, r, c) {
+		return
+	}
 	h := v4Runtime.health[key]
 	if h == nil || !h.ProbeInFlight {
 		return
@@ -466,6 +482,28 @@ func candidateHealthConfigEqualV4(a, b *PolicyCandidate) bool {
 		strings.TrimSpace(a.AuthIndex) == strings.TrimSpace(b.AuthIndex) &&
 		strings.TrimSpace(a.OverrideModel) == strings.TrimSpace(b.OverrideModel) &&
 		a.Enabled == b.Enabled
+}
+
+func candidateHealthConfigCurrentLockedV4(p *Policy, r *PolicyRule, c *PolicyCandidate) bool {
+	if p == nil || r == nil || c == nil {
+		return false
+	}
+	activePolicy := v4Runtime.state.Policies[strings.TrimSpace(p.KeyFingerprint)]
+	if activePolicy == nil {
+		return false
+	}
+	for _, activeRule := range activePolicy.Rules {
+		if activeRule == nil || activeRule.ID != r.ID {
+			continue
+		}
+		for _, activeCandidate := range activeRule.Candidates {
+			if activeCandidate != nil && activeCandidate.ID == c.ID {
+				return candidateHealthConfigEqualV4(activeCandidate, c)
+			}
+		}
+		return false
+	}
+	return false
 }
 
 func resetChangedCandidateHealthLockedV4(oldPolicy, newPolicy *Policy) {
