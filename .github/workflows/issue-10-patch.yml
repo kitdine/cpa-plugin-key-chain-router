@@ -43,10 +43,11 @@ jobs:
           python3 abi_smoke.py "../dist/key-chain-router-v${VERSION}.so"
       - name: Commit fix
         run: |
-          cd "$GITHUB_WORKSPACE"
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add src/main.go src/scheduler_auth.go src/v4_execution.go src/abi_smoke.py src/issue10_test.go src/review_findings_test.go
-          git diff --cached --check
-          git commit -m 'fix: enforce one credential per KCR attempt (#10) [issue-10-patched]'
-          git push origin HEAD:fix/issue-10-call-scoped-routing-guard
+          ROOT=/__w/cpa-plugin-key-chain-router/cpa-plugin-key-chain-router
+          test -d "$ROOT/.git"
+          git -C "$ROOT" config user.name 'github-actions[bot]'
+          git -C "$ROOT" config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git -C "$ROOT" add src/main.go src/scheduler_auth.go src/v4_execution.go src/abi_smoke.py src/issue10_test.go src/review_findings_test.go
+          git -C "$ROOT" diff --cached --check
+          git -C "$ROOT" commit -m 'fix: enforce one credential per KCR attempt (#10) [issue-10-patched]'
+          git -C "$ROOT" push origin HEAD:fix/issue-10-call-scoped-routing-guard
