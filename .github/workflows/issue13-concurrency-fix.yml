@@ -28,117 +28,91 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
+          import re
 
-          def replace_once(path, old, new):
-              p = Path(path)
-              s = p.read_text()
+          def replace_once(s, old, new, label):
               n = s.count(old)
               if n != 1:
-                  raise SystemExit(f'{path}: expected one match, got {n}: {old[:80]!r}')
-              p.write_text(s.replace(old, new, 1))
+                  raise SystemExit(f'{label}: expected one match, got {n}')
+              return s.replace(old, new, 1)
 
-          # A probe lease may only be released by the attempt that acquired it.
-          replace_once(
-              'src/v4_health.go',
+          hp = Path('src/v4_health.go')
+          hs = hp.read_text()
+          hs = replace_once(
+              hs,
               'func releaseCandidateProbeV4(p *Policy, r *PolicyRule, c *PolicyCandidate) {\n\tkey := candidateHealthKeyV4(p, r, c)\n',
               'func releaseCandidateProbeV4(p *Policy, r *PolicyRule, c *PolicyCandidate, owned bool) {\n\tif !owned {\n\t\treturn\n\t}\n\tkey := candidateHealthKeyV4(p, r, c)\n',
+              'probe release signature',
           )
+          hp.write_text(hs)
 
-          p = Path('src/v4_execution.go')
-          s = p.read_text()
+          ep = Path('src/v4_execution.go')
+          s = ep.read_text()
 
-          # Carry the exact failover action into the next atomic candidate acquisition.
           needle = '\tcurrentPriority := math.MaxInt\n'
           if s.count(needle) != 2:
-              raise SystemExit(f'expected two currentPriority blocks, got {s.count(needle)}')
+              raise SystemExit(f'currentPriority: expected 2, got {s.count(needle)}')
           s = s.replace(needle, needle + '\tnextAction := failNext\n', 2)
-          s = s.replace('nextHealthyCandidateV4(p, r, ranked, attempted, failNext, currentPriority)', 'nextHealthyCandidateV4(p, r, ranked, attempted, nextAction, currentPriority)')
 
-          old_follow = '\t\tnext := peekHealthyCandidateV4(p, r, ranked, attempted, action, currentPriority)\n\t\tif next == nil {\n\t\t\tbreak\n\t\t}\n\t\tranked = moveCandidateFirstV4(ranked, next.ID)\n'
-          if s.count(old_follow) != 3:
-              raise SystemExit(f'expected three peek/move blocks, got {s.count(old_follow)}')
-          s = s.replace(old_follow, '\t\tnextAction = action\n', 3)
+          old_pick = 'c, probe := nextHealthyCandidateV4(p, r, ranked, attempted, failNext, currentPriority)'
+          if s.count(old_pick) != 2:
+              raise SystemExit(f'initial picks: expected 2, got {s.count(old_pick)}')
+          s = s.replace(old_pick, 'c, probe := nextHealthyCandidateV4(p, r, ranked, attempted, nextAction, currentPriority)\n\t\tnextAction = failNext', 2)
 
-          # Stream JSON/decode and empty stream-id failures must also preserve configured action.
+          # Replace all peek/reorder pairs independent of indentation. The exact
+          # failover action is carried into the next atomic acquisition instead.
+          pattern = re.compile(
+              r'(?m)^(?P<i>\s*)next := peekHealthyCandidateV4\(p, r, ranked, attempted, action, currentPriority\)\n'
+              r'(?P=i)if next == nil \{\n'
+              r'(?P=i)\tbreak\n'
+              r'(?P=i)\}\n'
+              r'(?P=i)ranked = moveCandidateFirstV4\(ranked, next.ID\)\n'
+          )
+          s, n = pattern.subn(lambda m: m.group('i') + 'nextAction = action\n', s)
+          if n != 3:
+              raise SystemExit(f'peek/reorder: expected 3, got {n}')
+
+          # Stream decode failure follows the configured failover policy.
           old = '\t\tif err = json.Unmarshal(raw, &sr); err != nil {\n\t\t\tar.Error = err.Error()\n\t\t\tevent.Attempts = append(event.Attempts, ar)\n\t\t\tlastErr = err\n\t\t\trecordCandidateFailureV4(p, r, c, 0, err, nil, probe)\n\t\t\tcontinue\n\t\t}\n'
           new = '\t\tif err = json.Unmarshal(raw, &sr); err != nil {\n\t\t\tar.Error = err.Error()\n\t\t\tevent.Attempts = append(event.Attempts, ar)\n\t\t\tlastErr = err\n\t\t\trecordCandidateFailureV4(p, r, c, 0, err, nil, probe)\n\t\t\taction := failureActionV4(r.Failover, 0, err)\n\t\t\tif action == failCPADefault {\n\t\t\t\trunCPADefaultStreamV4(event, source, clientModel, body, headers, query, alt, callbackID, outStreamID, started)\n\t\t\t\treturn\n\t\t\t}\n\t\t\tif action == failStop {\n\t\t\t\tbreak\n\t\t\t}\n\t\t\tnextAction = action\n\t\t\tcontinue\n\t\t}\n'
-          if s.count(old) != 1:
-              raise SystemExit('stream json failure block not found exactly once')
-          s = s.replace(old, new, 1)
+          s = replace_once(s, old, new, 'stream decode failure')
 
           old = '\t\tif sr.StreamID == "" {\n\t\t\tlastErr = errors.New("host stream id 为空")\n\t\t\tevent.Attempts[len(event.Attempts)-1].Error = lastErr.Error()\n\t\t\trecordCandidateFailureV4(p, r, c, 0, lastErr, sr.Headers, probe)\n\t\t\tcontinue\n\t\t}\n'
           new = '\t\tif sr.StreamID == "" {\n\t\t\tlastErr = errors.New("host stream id 为空")\n\t\t\tevent.Attempts[len(event.Attempts)-1].Error = lastErr.Error()\n\t\t\trecordCandidateFailureV4(p, r, c, 0, lastErr, sr.Headers, probe)\n\t\t\taction := failureActionV4(r.Failover, 0, lastErr)\n\t\t\tif action == failCPADefault {\n\t\t\t\trunCPADefaultStreamV4(event, source, clientModel, body, headers, query, alt, callbackID, outStreamID, started)\n\t\t\t\treturn\n\t\t\t}\n\t\t\tif action == failStop {\n\t\t\t\tbreak\n\t\t\t}\n\t\t\tnextAction = action\n\t\t\tcontinue\n\t\t}\n'
-          if s.count(old) != 1:
-              raise SystemExit('empty stream id block not found exactly once')
-          s = s.replace(old, new, 1)
+          s = replace_once(s, old, new, 'empty stream id')
 
-          # For first-read failures, preserve the configured action before returning to outer loop.
+          # If the upstream fails before the first emitted payload, keep the exact
+          # action for the next outer-loop selection. failStop exits routing.
+          s = replace_once(s, '\t\tfirst := true\n\t\tfor {\n', '\t\tfirst := true\n\t\tstopAfterFirstReadFailure := false\n\t\tfor {\n', 'stream read loop')
+
           old = '\t\t\t\tif first {\n\t\t\t\t\tevent.Attempts[len(event.Attempts)-1].Error = e.Error()\n\t\t\t\t\tevent.Attempts[len(event.Attempts)-1].Status = statusFromError(e)\n\t\t\t\t\tbreak\n\t\t\t\t}\n'
-          new = '\t\t\t\tif first {\n\t\t\t\t\tevent.Attempts[len(event.Attempts)-1].Error = e.Error()\n\t\t\t\t\tevent.Attempts[len(event.Attempts)-1].Status = statusFromError(e)\n\t\t\t\t\taction := failureActionV4(r.Failover, statusFromError(e), e)\n\t\t\t\t\tif action == failCPADefault {\n\t\t\t\t\t\trunCPADefaultStreamV4(event, source, clientModel, body, headers, query, alt, callbackID, outStreamID, started)\n\t\t\t\t\t\treturn\n\t\t\t\t\t}\n\t\t\t\t\tif action == failStop {\n\t\t\t\t\t\tbreak\n\t\t\t\t\t}\n\t\t\t\t\tnextAction = action\n\t\t\t\t\tbreak\n\t\t\t\t}\n'
-          if s.count(old) != 1:
-              raise SystemExit('first stream read error block not found')
-          s = s.replace(old, new, 1)
+          new = '\t\t\t\tif first {\n\t\t\t\t\tevent.Attempts[len(event.Attempts)-1].Error = e.Error()\n\t\t\t\t\tevent.Attempts[len(event.Attempts)-1].Status = statusFromError(e)\n\t\t\t\t\taction := failureActionV4(r.Failover, statusFromError(e), e)\n\t\t\t\t\tif action == failCPADefault {\n\t\t\t\t\t\trunCPADefaultStreamV4(event, source, clientModel, body, headers, query, alt, callbackID, outStreamID, started)\n\t\t\t\t\t\treturn\n\t\t\t\t\t}\n\t\t\t\t\tif action == failStop {\n\t\t\t\t\t\tstopAfterFirstReadFailure = true\n\t\t\t\t\t} else {\n\t\t\t\t\t\tnextAction = action\n\t\t\t\t\t}\n\t\t\t\t\tbreak\n\t\t\t\t}\n'
+          s = replace_once(s, old, new, 'first read error')
 
           old = '\t\t\t\tif first {\n\t\t\t\t\tevent.Attempts[len(event.Attempts)-1].Error = rr.Error\n\t\t\t\t\tbreak\n\t\t\t\t}\n'
-          new = '\t\t\t\tif first {\n\t\t\t\t\tevent.Attempts[len(event.Attempts)-1].Error = rr.Error\n\t\t\t\t\taction := failureActionV4(r.Failover, 0, lastErr)\n\t\t\t\t\tif action == failCPADefault {\n\t\t\t\t\t\trunCPADefaultStreamV4(event, source, clientModel, body, headers, query, alt, callbackID, outStreamID, started)\n\t\t\t\t\t\treturn\n\t\t\t\t\t}\n\t\t\t\t\tif action == failStop {\n\t\t\t\t\t\tbreak\n\t\t\t\t\t}\n\t\t\t\t\tnextAction = action\n\t\t\t\t\tbreak\n\t\t\t\t}\n'
-          if s.count(old) != 1:
-              raise SystemExit('first stream rr.Error block not found')
-          s = s.replace(old, new, 1)
+          new = '\t\t\t\tif first {\n\t\t\t\t\tevent.Attempts[len(event.Attempts)-1].Error = rr.Error\n\t\t\t\t\taction := failureActionV4(r.Failover, 0, lastErr)\n\t\t\t\t\tif action == failCPADefault {\n\t\t\t\t\t\trunCPADefaultStreamV4(event, source, clientModel, body, headers, query, alt, callbackID, outStreamID, started)\n\t\t\t\t\t\treturn\n\t\t\t\t\t}\n\t\t\t\t\tif action == failStop {\n\t\t\t\t\t\tstopAfterFirstReadFailure = true\n\t\t\t\t\t} else {\n\t\t\t\t\t\tnextAction = action\n\t\t\t\t\t}\n\t\t\t\t\tbreak\n\t\t\t\t}\n'
+          s = replace_once(s, old, new, 'first read upstream error')
 
-          if s.count('releaseCandidateProbeV4(p, r, c)') != 1:
-              raise SystemExit(f'expected one releaseCandidateProbeV4 call, got {s.count("releaseCandidateProbeV4(p, r, c)")}')
-          s = s.replace('releaseCandidateProbeV4(p, r, c)', 'releaseCandidateProbeV4(p, r, c, probe)', 1)
-          p.write_text(s)
+          # Insert outer-loop stop check immediately after the inner read loop.
+          anchor = '\t\t\tif rr.Done {\n\t\t\t\t_ = closeHostStream(sr.StreamID)\n\t\t\t\trecordCandidateSuccessV4(p, r, c)\n'
+          if s.count(anchor) != 1:
+              raise SystemExit('rr.Done anchor missing')
+          # The check belongs after the inner loop, so add it by replacing the unique
+          # closing sequence following the rr.Done success-return block.
+          tail = '\t\t\t\t_ = closeOutputStream(outStreamID, "")\n\t\t\t\treturn\n\t\t\t}\n\t\t}\n\t}\n\tif r.Failover.Exhausted == failCPADefault {\n'
+          repl = '\t\t\t\t_ = closeOutputStream(outStreamID, "")\n\t\t\t\treturn\n\t\t\t}\n\t\t}\n\t\tif stopAfterFirstReadFailure {\n\t\t\tbreak\n\t\t}\n\t}\n\tif r.Failover.Exhausted == failCPADefault {\n'
+          s = replace_once(s, tail, repl, 'post stream read stop check')
 
-          t = Path('src/issue13_health_test.go')
-          ts = t.read_text()
+          s = replace_once(s, 'releaseCandidateProbeV4(p, r, c)', 'releaseCandidateProbeV4(p, r, c, probe)', 'probe release call')
+          ep.write_text(s)
+
+          tp = Path('src/issue13_health_test.go')
+          ts = tp.read_text()
           if 'TestIssue13ReleaseProbeRequiresOwnership' not in ts:
-              ts += (
-                  '\n\nfunc TestIssue13ReleaseProbeRequiresOwnership(t *testing.T) {\n'
-                  '\tresetIssue13Health(t)\n'
-                  '\tp, r, ranked := issue13Fixture()\n'
-                  '\ta := ranked[0]\n'
-                  '\trecordCandidateFailureV4(p, r, a, 503, nil, nil)\n'
-                  '\tkey := candidateHealthKeyV4(p, r, a)\n'
-                  '\tv4Runtime.Lock()\n'
-                  '\tv4Runtime.health[key].NextProbeAt = time.Now().Add(-time.Millisecond)\n'
-                  '\tv4Runtime.Unlock()\n'
-                  '\tif got, probe := nextHealthyCandidateV4(p, r, ranked, map[string]bool{}, failNext, int(^uint(0)>>1)); got == nil || got.ID != "a" || !probe {\n'
-                  '\t\tt.Fatalf("expected A probe, got=%v probe=%v", got, probe)\n'
-                  '\t}\n'
-                  '\treleaseCandidateProbeV4(p, r, a, false)\n'
-                  '\tv4Runtime.RLock()\n'
-                  '\tstillOwned := v4Runtime.health[key].ProbeInFlight\n'
-                  '\tv4Runtime.RUnlock()\n'
-                  '\tif !stillOwned {\n'
-                  '\t\tt.Fatal("non-owner released another attempt probe lease")\n'
-                  '\t}\n'
-                  '\treleaseCandidateProbeV4(p, r, a, true)\n'
-                  '\tv4Runtime.RLock()\n'
-                  '\treleased := !v4Runtime.health[key].ProbeInFlight\n'
-                  '\tv4Runtime.RUnlock()\n'
-                  '\tif !released {\n'
-                  '\t\tt.Fatal("owner failed to release probe lease")\n'
-                  '\t}\n'
-                  '}\n'
-              )
+              ts += '''\n\nfunc TestIssue13ReleaseProbeRequiresOwnership(t *testing.T) {\n\tresetIssue13Health(t)\n\tp, r, ranked := issue13Fixture()\n\ta := ranked[0]\n\trecordCandidateFailureV4(p, r, a, 503, nil, nil)\n\tkey := candidateHealthKeyV4(p, r, a)\n\tv4Runtime.Lock()\n\tv4Runtime.health[key].NextProbeAt = time.Now().Add(-time.Millisecond)\n\tv4Runtime.Unlock()\n\tif got, probe := nextHealthyCandidateV4(p, r, ranked, map[string]bool{}, failNext, int(^uint(0)>>1)); got == nil || got.ID != "a" || !probe {\n\t\tt.Fatalf("expected A probe, got=%v probe=%v", got, probe)\n\t}\n\treleaseCandidateProbeV4(p, r, a, false)\n\tv4Runtime.RLock()\n\tstillOwned := v4Runtime.health[key].ProbeInFlight\n\tv4Runtime.RUnlock()\n\tif !stillOwned {\n\t\tt.Fatal("non-owner released another attempt probe lease")\n\t}\n\treleaseCandidateProbeV4(p, r, a, true)\n\tv4Runtime.RLock()\n\treleased := !v4Runtime.health[key].ProbeInFlight\n\tv4Runtime.RUnlock()\n\tif !released {\n\t\tt.Fatal("owner failed to release probe lease")\n\t}\n}\n'''
           if 'TestIssue13NextPriorityAcquisitionNeverReturnsCurrentPriority' not in ts:
-              ts += (
-                  '\n\nfunc TestIssue13NextPriorityAcquisitionNeverReturnsCurrentPriority(t *testing.T) {\n'
-                  '\tresetIssue13Health(t)\n'
-                  '\tp, r, ranked := issue13Fixture()\n'
-                  '\tsame := &PolicyCandidate{ID: "same", Name: "Same", Provider: "codex", AuthIndex: "idx-same", Enabled: true, Priority: 100, Weight: 1}\n'
-                  '\tr.Candidates = []*PolicyCandidate{ranked[0], same, ranked[1]}\n'
-                  '\tranked = []*PolicyCandidate{ranked[0], same, ranked[1]}\n'
-                  '\tattempted := map[string]bool{"a": true}\n'
-                  '\trecordCandidateFailureV4(p, r, ranked[1], 503, nil, nil)\n'
-                  '\tgot, _ := nextHealthyCandidateV4(p, r, ranked, attempted, failNextPriority, 100)\n'
-                  '\tif got != nil {\n'
-                  '\t\tt.Fatalf("next-priority returned %s at priority %d; want nil while lower priority is unhealthy", got.ID, got.Priority)\n'
-                  '\t}\n'
-                  '}\n'
-              )
-          t.write_text(ts)
+              ts += '''\n\nfunc TestIssue13NextPriorityAcquisitionNeverReturnsCurrentPriority(t *testing.T) {\n\tresetIssue13Health(t)\n\tp, r, ranked := issue13Fixture()\n\tsame := &PolicyCandidate{ID: "same", Name: "Same", Provider: "codex", AuthIndex: "idx-same", Enabled: true, Priority: 100, Weight: 1}\n\tr.Candidates = []*PolicyCandidate{ranked[0], same, ranked[1]}\n\tranked = []*PolicyCandidate{ranked[0], same, ranked[1]}\n\tattempted := map[string]bool{"a": true}\n\trecordCandidateFailureV4(p, r, ranked[2], 503, nil, nil)\n\tgot, _ := nextHealthyCandidateV4(p, r, ranked, attempted, failNextPriority, 100)\n\tif got != nil {\n\t\tt.Fatalf("next-priority returned %s at priority %d; want nil while lower priority is unhealthy", got.ID, got.Priority)\n\t}\n}\n'''
+          tp.write_text(ts)
           PY
       - name: Format and test
         run: |
