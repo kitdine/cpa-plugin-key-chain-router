@@ -1,0 +1,58 @@
+name: Issue 13 Health Observability UI Fix
+
+on:
+  push:
+    branches:
+      - fix/issue-13-health-aware-failback
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: "!contains(github.event.head_commit.message, '[issue-13-observability-ui-done]')"
+    runs-on: ubuntu-latest
+    container:
+      image: golang:1.26-bookworm
+    steps:
+      - name: Install tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git build-essential python3 nodejs ca-certificates file binutils zip
+          rm -rf /var/lib/apt/lists/*
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/issue-13-health-aware-failback
+          fetch-depth: 0
+      - name: Apply fixes
+        run: |
+          python3 scripts/issue13_observability_ui_patch.py
+          sed -i '/"net\/http"/a\	"strings"' src/issue13_health_test.go
+      - name: Format and test
+        run: |
+          gofmt -w src/v4_types.go src/v4_health.go src/v4_execution.go src/v4_observability.go src/v4_management.go src/issue13_health_test.go
+          cd src
+          go test ./...
+          go vet ./...
+          node --check ui.js
+          grep -q 'health.probe_in_flight' ui.js
+          grep -q 'c.effective' ui.js
+      - name: Build and ABI smoke
+        run: |
+          bash ./scripts/build.sh
+          VERSION="$(tr -d '[:space:]' < VERSION)"
+          cd src
+          python3 abi_smoke.py "../dist/key-chain-router-v${VERSION}.so"
+      - name: Commit fixes and remove helpers
+        run: |
+          ROOT="$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "$ROOT"
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          rm -f "$ROOT/.github/workflows/issue13-observability-ui-fix.yml"
+          rm -f "$ROOT/scripts/issue13_observability_ui_patch.py"
+          git -C "$ROOT" add -A
+          git -C "$ROOT" diff --cached --check
+          git -C "$ROOT" commit -m 'fix: expose health skips and effective diagnostic route (#13) [issue-13-observability-ui-done]'
+          git -C "$ROOT" pull --rebase origin fix/issue-13-health-aware-failback
+          git -C "$ROOT" push origin HEAD:fix/issue-13-health-aware-failback
