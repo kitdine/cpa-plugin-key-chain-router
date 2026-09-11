@@ -119,6 +119,7 @@ func configureV4(statePath string, legacy State) error {
 	v4Runtime.recent = nil
 	v4Runtime.rr = map[string]uint64{}
 	v4Runtime.smooth = map[string]map[string]int{}
+	v4Runtime.health = map[string]*candidateHealthState{}
 	v4Runtime.Unlock()
 	return restartSQLiteSinkV4()
 }

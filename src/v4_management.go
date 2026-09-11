@@ -40,6 +40,7 @@ func handleAPIV4(req managementRequest) (map[string]any, error) {
 			v4Runtime.state.Policies = map[string]*Policy{}
 		}
 		v4Runtime.state.Policies[p.KeyFingerprint] = clonePolicyV4(&p)
+		pruneCandidateHealthLockedV4()
 		v4Runtime.Unlock()
 		if err := saveV4State(); err != nil {
 			return nil, err
@@ -49,6 +50,7 @@ func handleAPIV4(req managementRequest) (map[string]any, error) {
 		fp := strings.TrimSpace(req.Query.Get("fingerprint"))
 		v4Runtime.Lock()
 		delete(v4Runtime.state.Policies, fp)
+		pruneCandidateHealthLockedV4()
 		v4Runtime.Unlock()
 		if err := saveV4State(); err != nil {
 			return nil, err
@@ -136,17 +138,19 @@ func buildSnapshotV4() map[string]any {
 	cfgPath := runtimeState.configPath
 	runtimeState.RUnlock()
 	return map[string]any{
-		"ok":              true,
-		"version":         pluginVersion,
-		"schema":          schema,
-		"config_path":     cfgPath,
-		"config_error":    configErr,
-		"downstream_keys": keys,
-		"resources":       resources,
-		"policies":        policies,
-		"observability":   st.Observability,
-		"sqlite_status":   sqliteStatusV62(),
-		"recent_events":   recent,
+		"ok":               true,
+		"version":          pluginVersion,
+		"schema":           schema,
+		"config_path":      cfgPath,
+		"config_error":     configErr,
+		"downstream_keys":  keys,
+		"resources":        resources,
+		"policies":         policies,
+		"observability":    st.Observability,
+		"sqlite_status":    sqliteStatusV62(),
+		"health_defaults":  candidateHealthDefaultsV4(),
+		"candidate_health": candidateHealthSnapshotV4(),
+		"recent_events":    recent,
 	}
 }
 
@@ -281,7 +285,7 @@ func queryEventsV4(q url.Values) map[string]any {
 			"providers":  sortedFacetV6(facetProviders),
 			"models":     sortedFacetV6(facetModels),
 		},
-		"events": events,
+		"events":        events,
 		"sqlite_status": sqliteStatusV62(),
 	}
 }
@@ -475,7 +479,7 @@ func diagnosePolicyV4(fp, model string) map[string]any {
 	ranked := rankCandidatesV4(p, rule, http.Header{}, map[string]any{})
 	items := []map[string]any{}
 	for i, c := range ranked {
-		items = append(items, map[string]any{"order": i + 1, "name": c.Name, "provider": c.Provider, "auth_index": c.AuthIndex, "priority": c.Priority, "weight": c.Weight, "override_model": c.OverrideModel})
+		items = append(items, map[string]any{"order": i + 1, "name": c.Name, "provider": c.Provider, "auth_index": c.AuthIndex, "priority": c.Priority, "weight": c.Weight, "override_model": c.OverrideModel, "health": candidateHealthViewV4(p, rule, c)})
 	}
 	decision := decisionHandled
 	if rule.Strategy == strategyCPADefault {

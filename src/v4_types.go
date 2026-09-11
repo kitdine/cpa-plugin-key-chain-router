@@ -135,8 +135,10 @@ var v4Runtime = struct {
 	recent []RoutingEvent
 	rr     map[string]uint64
 	smooth map[string]map[string]int
+	health map[string]*candidateHealthState
 	sqlite *sqliteSink
 }{
 	rr:     map[string]uint64{},
 	smooth: map[string]map[string]int{},
+	health: map[string]*candidateHealthState{},
 }
