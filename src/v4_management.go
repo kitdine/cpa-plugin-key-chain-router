@@ -39,7 +39,9 @@ func handleAPIV4(req managementRequest) (map[string]any, error) {
 		if v4Runtime.state.Policies == nil {
 			v4Runtime.state.Policies = map[string]*Policy{}
 		}
-		v4Runtime.state.Policies[p.KeyFingerprint] = clonePolicyV4(&p)
+		replacement := clonePolicyV4(&p)
+		resetChangedCandidateHealthLockedV4(v4Runtime.state.Policies[p.KeyFingerprint], replacement)
+		v4Runtime.state.Policies[p.KeyFingerprint] = replacement
 		pruneCandidateHealthLockedV4()
 		v4Runtime.Unlock()
 		if err := saveV4State(); err != nil {

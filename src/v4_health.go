@@ -456,6 +456,55 @@ func candidateHealthSnapshotV4() []candidateHealthSnapshot {
 	return out
 }
 
+func candidateHealthConfigEqualV4(a, b *PolicyCandidate) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return strings.TrimSpace(a.ResourceID) == strings.TrimSpace(b.ResourceID) &&
+		strings.TrimSpace(a.ResourceKind) == strings.TrimSpace(b.ResourceKind) &&
+		strings.TrimSpace(a.Provider) == strings.TrimSpace(b.Provider) &&
+		strings.TrimSpace(a.AuthIndex) == strings.TrimSpace(b.AuthIndex) &&
+		strings.TrimSpace(a.OverrideModel) == strings.TrimSpace(b.OverrideModel) &&
+		a.Enabled == b.Enabled
+}
+
+func resetChangedCandidateHealthLockedV4(oldPolicy, newPolicy *Policy) {
+	if oldPolicy == nil || newPolicy == nil || len(v4Runtime.health) == 0 {
+		return
+	}
+	oldRules := make(map[string]*PolicyRule, len(oldPolicy.Rules))
+	for _, r := range oldPolicy.Rules {
+		if r != nil {
+			oldRules[r.ID] = r
+		}
+	}
+	for _, newRule := range newPolicy.Rules {
+		if newRule == nil {
+			continue
+		}
+		oldRule := oldRules[newRule.ID]
+		if oldRule == nil {
+			continue
+		}
+		oldCandidates := make(map[string]*PolicyCandidate, len(oldRule.Candidates))
+		for _, c := range oldRule.Candidates {
+			if c != nil {
+				oldCandidates[c.ID] = c
+			}
+		}
+		for _, newCandidate := range newRule.Candidates {
+			if newCandidate == nil {
+				continue
+			}
+			oldCandidate := oldCandidates[newCandidate.ID]
+			if oldCandidate == nil || candidateHealthConfigEqualV4(oldCandidate, newCandidate) {
+				continue
+			}
+			delete(v4Runtime.health, candidateHealthKeyV4(oldPolicy, oldRule, oldCandidate))
+		}
+	}
+}
+
 func pruneCandidateHealthLockedV4() {
 	if len(v4Runtime.health) == 0 {
 		return

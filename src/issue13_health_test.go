@@ -381,3 +381,34 @@ func TestIssue13StreamErrorStatusClassification(t *testing.T) {
 		t.Fatalf("429 must open circuit: %#v", view)
 	}
 }
+
+func TestIssue13MaterialCandidateConfigChangeResetsHealth(t *testing.T) {
+	resetIssue13Health(t)
+	p, r, ranked := issue13Fixture()
+	a := ranked[0]
+	recordCandidateFailureV4(p, r, a, 503, nil, nil)
+	key := candidateHealthKeyV4(p, r, a)
+
+	// Selection-only tuning must preserve endpoint health.
+	weightOnly := clonePolicyV4(p)
+	weightOnly.Rules[0].Candidates[0].Weight = 9
+	v4Runtime.Lock()
+	resetChangedCandidateHealthLockedV4(p, weightOnly)
+	_, stillPresent := v4Runtime.health[key]
+	v4Runtime.Unlock()
+	if !stillPresent {
+		t.Fatal("weight-only change unexpectedly reset candidate health")
+	}
+
+	// A material execution change fixes/replaces the upstream target and must
+	// immediately discard the stale OPEN state rather than waiting for cooldown.
+	changed := clonePolicyV4(p)
+	changed.Rules[0].Candidates[0].OverrideModel = "fixed-model"
+	v4Runtime.Lock()
+	resetChangedCandidateHealthLockedV4(p, changed)
+	_, stillPresent = v4Runtime.health[key]
+	v4Runtime.Unlock()
+	if stillPresent {
+		t.Fatal("material candidate config change retained stale health state")
+	}
+}
