@@ -43,6 +43,7 @@ jobs:
           python3 abi_smoke.py "../dist/key-chain-router-v${VERSION}.so"
       - name: Commit fix
         run: |
+          cd "$GITHUB_WORKSPACE"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add src/main.go src/scheduler_auth.go src/v4_execution.go src/abi_smoke.py src/issue10_test.go src/review_findings_test.go
