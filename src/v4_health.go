@@ -124,41 +124,42 @@ func candidateWouldBeSelectableV4(p *Policy, r *PolicyRule, c *PolicyCandidate, 
 	return state == healthHalfOpen
 }
 
-func acquireCandidateHealthWithReasonV4(p *Policy, r *PolicyRule, c *PolicyCandidate, now time.Time) (bool, bool, string) {
+func acquireCandidateHealthWithReasonV4(p *Policy, r *PolicyRule, c *PolicyCandidate, now time.Time) (bool, bool, uint64, string) {
 	key := candidateHealthKeyV4(p, r, c)
-	if key == "" {
-		return true, false, ""
-	}
 	v4Runtime.Lock()
 	defer v4Runtime.Unlock()
+	generation := v4Runtime.generation
+	if key == "" {
+		return true, false, generation, ""
+	}
 	if !candidateHealthConfigCurrentLockedV4(p, r, c) {
-		return true, false, ""
+		return true, false, generation, ""
 	}
 	h := candidateHealthStateLockedV4(key)
 	if h.State == healthClosed {
-		return true, false, ""
+		return true, false, generation, ""
 	}
 	name := strings.TrimSpace(c.Name)
 	if name == "" {
 		name = c.ID
 	}
 	if h.ProbeInFlight {
-		return false, false, fmt.Sprintf("候选 %s 健康状态=%s，已有恢复探测正在执行，跳过", name, h.State)
+		return false, false, generation, fmt.Sprintf("候选 %s 健康状态=%s，已有恢复探测正在执行，跳过", name, h.State)
 	}
 	if h.State == healthOpen && !h.NextProbeAt.IsZero() && now.Before(h.NextProbeAt) {
 		retryMs := h.NextProbeAt.Sub(now).Milliseconds()
 		if retryMs < 0 {
 			retryMs = 0
 		}
-		return false, false, fmt.Sprintf("候选 %s 健康状态=OPEN，约 %dms 后允许恢复探测，跳过", name, retryMs)
+		return false, false, generation, fmt.Sprintf("候选 %s 健康状态=OPEN，约 %dms 后允许恢复探测，跳过", name, retryMs)
 	}
 	h.State = healthHalfOpen
 	h.ProbeInFlight = true
-	return true, true, ""
+	return true, true, generation, ""
 }
 
 func acquireCandidateHealthV4(p *Policy, r *PolicyRule, c *PolicyCandidate, now time.Time) (bool, bool) {
-	ok, probe, _ := acquireCandidateHealthWithReasonV4(p, r, c, now)
+	ok, probe, _, _ := acquireCandidateHealthWithReasonV4(p, r, c, now)
 	return ok, probe
 }
 
@@ -191,9 +192,13 @@ func chooseHealthyCandidateV4(p *Policy, r *PolicyRule, ranked []*PolicyCandidat
 				continue
 			}
 			if acquire {
-				ok, probe, skipReason := acquireCandidateHealthWithReasonV4(p, r, c, now)
+				ok, probe, generation, skipReason := acquireCandidateHealthWithReasonV4(p, r, c, now)
 				if ok {
-					return c, probe
+					// Return a per-attempt clone so concurrent requests never race while
+					// carrying the generation captured atomically with health acquisition.
+					acquired := *c
+					acquired.runtimeGeneration = generation
+					return &acquired, probe
 				}
 				if healthSkips != nil && skipReason != "" {
 					*healthSkips = append(*healthSkips, skipReason)
@@ -510,6 +515,9 @@ func candidateHealthConfigEqualV4(a, b *PolicyCandidate) bool {
 
 func candidateHealthConfigCurrentLockedV4(p *Policy, r *PolicyRule, c *PolicyCandidate) bool {
 	if p == nil || r == nil || c == nil {
+		return false
+	}
+	if c.runtimeGeneration != 0 && c.runtimeGeneration != v4Runtime.generation {
 		return false
 	}
 	activePolicy := v4Runtime.state.Policies[strings.TrimSpace(p.KeyFingerprint)]
