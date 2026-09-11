@@ -1,5 +1,36 @@
 # Changelog
 
+## v0.6.4 - 2026-09-11
+
+集中清理此前 Codex Review 遗留的问题，并把“CI + Codex Review 零未解决 finding”作为合并门槛。
+
+### Scheduler 正确性
+
+- `scheduler.pick` 在通过 `AuthIndex → host.auth.list → AuthID` 解析运行时 ID 前，重新确认目标 credential 仍存在于 CPA 本次 `Candidates` 中，避免绕过 cooldown、不可用或 provider/model 资格筛选。
+- 同一 `AuthIndex + Provider` 如果仍映射到多个不同 AuthID，改为 fail closed，不再依赖 `host.auth.list` 返回顺序任意选择。
+
+### 路由可观测性
+
+- 路由事件保留请求实际执行时使用的 Rule 快照；`selection_reasons` 不再因为长请求执行期间 Policy 被编辑/删除而被事后改写。
+- 移动端展开详情补齐桌面表格在窄屏隐藏的时间、Model、Policy、Rule、Strategy、最终候选、Provider、状态、耗时和 Attempts。
+
+### SQLite
+
+- Schema migration 改为先检查列是否已存在；真实 `ALTER TABLE` 或历史数据清理失败会显式返回，不再静默吞掉。
+- SQLite 写入失败或异步队列发生丢事件后，writer 会进入 sticky degraded 状态；在 sink 重启前路由记录查询自动回退到 Memory，避免持续展示“仍可读但已停止更新”的陈旧数据库历史。
+- 同一次路由记录查询中的统计、P95、事件列表、Attempts 与 Facets 统一在一个 SQLite 只读事务快照中读取，避免并发写入导致 `matched` / `returned` / 统计互相不一致。
+
+### README / 发布流程
+
+- README 不再承担 release notes 职责，改为只描述项目用途、路由模型、安装配置、使用方式、可观测性、SQLite、安全边界和开发流程。
+- 版本历史统一放在 `CHANGELOG.md` 与 GitHub Releases。
+- 后续 PR 必须同时满足：标准 CI 全绿、Codex Review 已完成、unresolved findings = 0，才允许合并。
+
+### 测试
+
+- 新增 scheduler candidate eligibility、重复 AuthID 消歧、请求 Rule 快照、SQLite migration、writer degraded fallback 与一致性事务查询等回归测试。
+- PR #7 已通过 Go test、Go vet、JavaScript syntax、Linux amd64 c-shared build、ABI smoke、binary inspection 和 artifact packaging，并完成 Codex Review 且无新 finding。
+
 ## v0.6.3 - 2026-09-10
 
 修正路由记录列表的时间展示。后端与 SQLite 继续统一保存 UTC RFC3339 时间，前端列表改为按浏览器本地时区转换显示。

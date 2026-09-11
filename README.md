@@ -1,113 +1,110 @@
-# CPA Key Chain Router v0.6.3
+# CPA Key Chain Router
 
-CLIProxyAPI（CPA）v7 动态策略路由插件。保留 CPA 原生下游 `api-keys` 认证、usage 和请求监控，仅在认证后根据下游 API Key、模型和策略选择上游 OAuth / API credential。
+CLIProxyAPI（CPA）v7 的动态策略路由插件。
+
+它保留 CPA 原生的下游 `api-keys` 认证、usage 与请求监控，在认证完成后，根据 **下游 API Key + Model + Policy/Rule** 选择具体的上游 OAuth / API credential，并提供 failover、轮询、权重、优先级、sticky 路由与可观测性。
 
 当前重点兼容：CLIProxyAPI v7.2.154（schema 5）、Linux amd64 / Debian Bookworm 类环境。
 
-## v0.6.3 浏览器本地时间
+> 版本变更记录请查看 `CHANGELOG.md` 与 GitHub Releases。README 只描述当前版本的用途和使用方式。
 
-路由事件在后端和 SQLite 中仍以 UTC RFC3339 保存；管理页“路由记录”的时间列会在浏览器端转换为当前浏览器本地时区，并以 `MM-DD HH:mm:ss` 展示。鼠标悬停保留原始 UTC 时间。这样不同地区访问同一个 CPA 实例时，各自看到符合本地时区的列表时间，同时数据库与筛选逻辑保持统一 UTC 语义。
+## 解决什么问题
 
-## v0.6.2 SQLite 持久化修复
+CPA 原生可以管理多个 OAuth / API credential，但当你希望不同的下游 API Key 使用不同的上游链路时，需要一个显式、可控、可诊断的调度层。
 
-v0.6.2 将 SQLite 从“仅写入归档”升级为管理页真正使用的持久化数据源：
-
-- SQLite 开启且正常运行时，“路由记录”的查询、筛选和统计直接读取数据库。
-- 页面刷新、插件 reconfigure/reload 或 CPA 进程重启后，数据库中的历史路由记录仍然可见。
-- 可观测性页面会显示 SQLite 的运行状态、实际绝对路径、数据库文件大小、Events / Attempts 数量、WAL journal、最后写入时间和最后错误。
-- 数据库打开或写入失败不会影响模型路由；插件会保留路由能力、记录错误，并在查询端回退到 Memory。
-- `routing_events` 新增最终 `error` 字段，旧数据库启动时自动迁移。
-
-数据源规则：**SQLite ON + active → SQLite；否则 → Memory**。因此开启 SQLite 后，路由记录不再受内存 ring buffer 清空影响。
-
-## v0.6.1 紧凑路由列表
-
-v0.6.1 保留 v0.6.0 的统计、查询和选择原因数据，只优化管理页的日志阅读方式：
-
-- 路由记录改为紧凑表格，一行一个请求。
-- 主列表显示时间、Model、Policy / Rule、Strategy、最终候选、Provider、状态、耗时和 Attempts。
-- 正常请求使用简洁的绿色成功状态，不再重复展示 `KCR_HANDLED` 长字符串；Fallback、Bypass、失败分别突出显示。
-- Attempts > 1 会醒目标记，便于快速定位真正发生过 Failover 的请求。
-- 点击任意行展开完整 Decision、Trace、最终 AuthIndex、候选尝试链和每次“选择原因”。
-- 桌面端表头固定；窄屏自动使用摘要行 + 展开详情。
-
-本版本不改变路由算法、Failover 行为或日志持久化语义。
-
-## v0.6.0 路由记录
-
-v0.6.0 将“最近路由记录”升级为可查询的路由诊断页：
-
-- 统计当前筛选范围内的请求数、成功率、平均耗时、P95、Fallback 数和平均尝试次数。
-- 支持全文搜索，以及 Decision、成功/失败、Policy、Strategy、Provider、Model、状态码和时间窗口筛选。
-- 每次候选 attempt 都显示“选择原因”，解释为什么首选该 credential，以及失败后为什么切换到下一个候选或 CPA Default。
-- `ordered-failover`、`round-robin`、Smooth Weighted Round Robin、Priority Weighted、Sticky Weighted Rendezvous Hash 都会给出对应的首选依据。
-- Failover 会说明上一候选的结果以及 `next`、`same-priority-first`、`next-priority`、`cpa-default` 等动作。
-
-未配置 KCR Policy 的 API Key 请求不属于 KCR 的有效路由样本，因此 v0.6.0 起这类请求直接忽略：**不进入内存记录、不写 SQLite、不写 `kcr routing decision` host log，也不在管理页显示**。已配置但停用 Policy、已配置 Policy 但 model 未命中 Rule、显式 `cpa-default` 等情况仍保留记录，因为它们对策略诊断有价值。
-
-SQLite 旧数据库会自动增加 `selection_reasons` 字段，并清理历史 `reason=no_policy` 记录。
-
-## v0.5.0 调度修复
-
-v0.5.0 修复 v0.4.0 中 scheduler 将候选 `ID` 误当作真实 `AuthID` 的问题。现在实际调度路径为：
+例如：
 
 ```text
-Policy Candidate AuthIndex
-  → X-CPA-Key-Chain-Ticket
-  → scheduler.pick
-  → host.auth.list
-  → 按 AuthIndex 找到当前真实 files[].id
-  → 返回 AuthID
+OAuth: a b c
+API:   x y z
+
+api-key-1: a → b → c → x → y → z
+api-key-2: x → y → z → a → b → c
 ```
 
-`AuthIndex` 继续作为 KCR state 中的稳定定位字段；运行时 `AuthID` 始终从 CPA 当前 `host.auth.list` 解析，不再从 scheduler Candidates 推断。若无法唯一解析，scheduler fail closed，不会静默让 CPA 默认 scheduler 改选其他 credential。
+Key Chain Router 的目标是：
 
-管理 UI 会根据 Strategy 只展示有效字段：
+- 保留 CPA 原生下游认证，不自行接管 API Key 校验。
+- 一个下游 API Key 对应一个 Policy。
+- 一个 Policy 可按 Model 定义多条 Rule。
+- 每条 Rule 独立决定候选 credential、调度策略、Failover 行为和可选 Model Override。
+- 精确选择具体 credential，同时不绕过 CPA 当前的候选资格、cooldown 与可用性判断。
+- 提供可查询的路由记录、选择原因、统计和可选 SQLite 持久化。
 
-- `ordered-failover` / `round-robin`：隐藏 Priority、Weight。
-- `weighted-round-robin`：仅显示 Weight。
-- `priority-weighted` / `sticky`：显示 Priority、Weight。
-- `cpa-default`：无候选字段。
-
-## Policy / Rule 模型
+## 路由模型
 
 一个下游 API Key **只能对应一个 Policy**：
 
 ```text
 API Key
-  └─ Policy（唯一）
+  └─ Policy
       ├─ Rule: gpt-5.6-luna
       ├─ Rule: gpt-5.6-sol
       ├─ Rule: claude-*
       └─ Rule: *
 ```
 
-Rule 匹配优先级固定为：精确 model > glob (`*` / `?`) > `*` catch-all。一个 Policy 内同一个精确 model 不能重复，且最多只能有一个 `*` Rule。
+Rule 匹配优先级：
 
-旧 v0.3 state 会自动迁移：同一 API Key 的旧 Route 合并成一个 Policy，每条旧 Route 变成一个 Rule，候选保持 `ordered-failover`。
+```text
+精确 model > glob（* / ?）> * catch-all
+```
+
+同一个 Policy 内：
+
+- 同一个精确 Model 不能重复。
+- 最多只能有一个 `*` Rule。
+- 每条 Rule 可使用完全不同的候选链和调度策略。
+
+## Credential 定位与调度
+
+KCR state 保存的是稳定的 `AuthIndex`，不会把运行时 `AuthID` 当作持久标识。
+
+实际调度路径：
+
+```text
+Policy Candidate AuthIndex
+  → X-CPA-Key-Chain-Ticket
+  → scheduler.pick
+  → 验证目标仍存在于 CPA 本次 Candidates
+  → host.auth.list
+  → AuthIndex + Provider 唯一解析当前真实 files[].id
+  → 返回 AuthID
+```
+
+如果目标 credential 已被 CPA 从当前 `Candidates` 排除，例如 cooldown、不可用或不符合当前 provider/model，则 KCR 不会通过 `host.auth.list` 绕过这一资格判断。
+
+如果同一 `AuthIndex + Provider` 无法唯一映射到一个 AuthID，也会 fail closed，而不是任意选择其中一个。
 
 ## 调度策略
 
 每条 Rule 可独立选择：
 
-- `ordered-failover`：按候选顺序执行 A → B → C。
-- `round-robin`：轮询首选候选，失败后继续后续候选。
-- `weighted-round-robin`：Smooth Weighted Round Robin，长期按 Weight 平滑分配。
-- `priority-weighted`：先选择最高 Priority 组，同组按 Weight 平滑分配；失败后可继续同组或降级到下一 Priority。
-- `sticky`：Weighted Rendezvous Hash；相同 session/header 尽量稳定命中同一 credential，有利于上游 cache。
-- `cpa-default`：明确不由 KCR 接管，交还 CPA 默认 router。
+- `ordered-failover`：按候选配置顺序选择。
+- `round-robin`：轮询首选候选，失败后继续其他候选。
+- `weighted-round-robin`：Smooth Weighted Round Robin。
+- `priority-weighted`：先选最高 Priority 组，再在组内按 Weight 平滑分配。
+- `sticky`：Weighted Rendezvous Hash，相同 session/header 尽量稳定命中同一 credential。
+- `cpa-default`：明确交回 CPA 默认路由，不由 KCR 接管。
 
-候选字段：
+候选常用字段：
 
 ```text
 Priority       数值越大优先级越高
-Weight         同策略/同优先级内的相对流量权重
-Override Model 留空时继承客户端原始 model；填写时仅该候选覆盖 model/alias
+Weight         同策略 / 同优先级内的相对流量权重
+Override Model 留空时继承客户端 model；填写时仅该候选覆盖 model/alias
 ```
 
-## Failover 策略
+UI 会按 Strategy 隐藏无意义字段：
 
-每个 Rule 可分别定义这些失败类别的行为：
+- `ordered-failover` / `round-robin`：不显示 Priority、Weight。
+- `weighted-round-robin`：只显示 Weight。
+- `priority-weighted` / `sticky`：显示 Priority、Weight。
+- `cpa-default`：不显示候选字段。
+
+## Failover
+
+每条 Rule 可分别定义不同错误类型的处理动作：
 
 - network error
 - 401 / 403
@@ -119,53 +116,104 @@ Override Model 留空时继承客户端原始 model；填写时仅该候选覆�
 
 可选动作：
 
-- `next`：下一候选
-- `same-priority-first`：先尝试同 Priority 的其他候选，再降级
-- `next-priority`：直接跳到更低 Priority
-- `stop`：停止 failover
-- `cpa-default`：转 CPA 默认路由
+- `next`：下一候选。
+- `same-priority-first`：先尝试同 Priority 的其他候选，再降级。
+- `next-priority`：直接进入下一 Priority。
+- `stop`：停止 failover。
+- `cpa-default`：转 CPA 默认路由。
 
-候选全部耗尽后还可选择返回错误或 `cpa-default`。`max_attempts=0` 表示自动按候选数决定。
+候选全部耗尽后也可选择直接失败或转 `cpa-default`。
+
+`max_attempts=0` 表示自动按候选数量决定。
+
+## Sticky 路由
+
+`sticky` 使用 Weighted Rendezvous Hash，不维护额外的 session → provider 持久映射。
+
+默认 `auto` 会尝试从请求中获取：
+
+- metadata 的 `session_id` / `sessionId` / `trace_id`
+- `X-Claude-Code-Session-Id`
+- `X-Session-Id`
+- `Session-Id`
+- `X-Request-Id`
+
+也可以指定自定义 Header。
+
+适合希望相同 session 尽量命中同一上游 credential、提高上游缓存命中率的场景。
 
 ## 路由决策与可观测性
 
-对于进入 KCR 可观测范围的请求，决策分为：
+对于进入 KCR 管理范围的请求，主要决策为：
 
 ```text
-KCR_HANDLED              插件接管并按 Policy/Rule 执行
-KCR_FALLBACK_TO_CPA      插件已接管，但按 Failover 规则最终转 CPA 默认路由
+KCR_HANDLED              KCR 接管并按 Policy / Rule 执行
+KCR_FALLBACK_TO_CPA      KCR 接管后按 Failover 规则转 CPA 默认路由
 KCR_BYPASS_CPA_DEFAULT   已配置 Policy，但 Rule 未命中或 Rule 明确为 cpa-default
 ```
 
-注意：**完全未配置 Policy 的 API Key 不再生成 KCR 路由事件**。
+**完全未配置 Policy 的 API Key 不生成 KCR 路由事件**：不进入内存记录、不写 SQLite、不写 `kcr routing decision` host log，也不在管理页显示。
 
-管理页“路由记录”可查看：
+路由记录页面支持：
+
+- 紧凑列表，一条请求一行。
+- 浏览器本地时间显示，原始时间仍以 UTC RFC3339 保存。
+- Model、Policy / Rule、Strategy、最终候选、Provider、状态、耗时、Attempts。
+- 全文搜索。
+- Decision、成功/失败、Policy、Strategy、Provider、Model、HTTP 状态、时间范围过滤。
+- 请求数、成功率、平均耗时、P95、Fallback 数、平均尝试次数统计。
+- 点击展开完整候选尝试链与每一步“为什么选到这个候选”的原因。
+- 移动端展开详情会补齐桌面表格折叠掉的字段。
+
+选择原因基于**请求实际执行时的 Rule 快照**生成，不会因为请求执行过程中 Policy 被编辑而被事后改写。
+
+## SQLite 持久化
+
+默认使用内存 Ring Buffer；需要跨页面刷新、插件重载或 CPA 重启保留历史时，可开启 SQLite。
+
+数据源规则：
 
 ```text
-时间 / model / Policy / Rule / Strategy
-最终 resource / Provider / AuthIndex / status / latency
-每次候选尝试 / 每次选择原因 / Failover 原因
+SQLite OFF
+  → 查询 Memory
+
+SQLite ON + writer healthy
+  → 查询 SQLite
+
+SQLite ON + 打开/查询失败
+  → 查询 Memory
+
+SQLite ON + 写入失败或队列丢事件
+  → writer 标记 degraded
+  → 查询 Memory
+  → 直到 SQLite sink 重启后重新恢复
 ```
 
-查询 API 会根据运行状态选择数据源：SQLite 开启且 active 时直接读取持久化数据库；否则使用当前内存 ring buffer。默认最多返回 200 条、上限 1000 条。
+这样可以避免数据库发生写失败后，管理页仍持续展示一份“可读但已经停止更新”的陈旧 SQLite 历史。
 
-CPA 日志默认写入 `kcr routing decision`，包含 decision、rule、strategy、provider、auth_index、attempts、duration_ms、reason 和 selection_reasons。
+SQLite 状态页显示：
 
-### 可选调试响应 Header
+- Enabled / Active
+- 实际数据库绝对路径
+- 文件大小
+- Events / Attempts 行数
+- Journal Mode
+- 最后成功写入时间
+- 最后错误
+- Writer 是否 healthy
 
-默认关闭，不污染客户端响应。开启后，仅返回：
+一次路由记录查询中的统计、P95、事件列表、Attempts 和 Facets 会在同一个 SQLite 只读事务快照中读取，避免并发写入造成 `matched`、`returned` 与统计数据互相不一致。
 
-```text
-X-KCR-Decision
-X-KCR-Trace-ID
-X-KCR-Rule
-```
+SQLite 使用 WAL + busy timeout，由异步 writer goroutine 写入；数据库异常不会阻塞模型请求。
 
-不会返回 API secret / OAuth token。内部精确 credential 选择使用一次性 `X-CPA-Key-Chain-Ticket`；票据由 scheduler 单次消费，并通过 `host.auth.list` 将稳定 `AuthIndex` 解析为当前真实 `AuthID`。
+SQLite 表：
 
-## 可观测性配置
+- `routing_events`：请求级最终决策、最终结果、selection reasons。
+- `routing_attempts`：请求内的每一次候选尝试。
 
-默认：
+只保存路由元数据，不保存 Prompt、请求/响应正文、完整 API Key、上游 API secret 或 OAuth Token。
+
+## 可观测性默认配置
 
 ```text
 Memory Ring Buffer  ON   500 条
@@ -174,34 +222,21 @@ SQLite              OFF
 Response Headers    OFF
 ```
 
-SQLite 可在中文页面开启。数据库采用 WAL + busy timeout，由异步 writer goroutine 写入；写库队列满时丢弃观测事件并告警，不阻塞模型请求。
+可选调试响应 Header 默认关闭。开启后只返回：
 
-SQLite 表：
+```text
+X-KCR-Decision
+X-KCR-Trace-ID
+X-KCR-Rule
+```
 
-- `routing_events`：一条请求的最终决策、最终结果与 selection reasons
-- `routing_attempts`：该请求的每次候选尝试
-
-只保存路由元数据，不保存 Prompt、请求/响应正文、完整 API Key、上游 API secret 或 OAuth Token。支持保留天数和最大记录数自动清理。
-
-## Sticky
-
-`sticky` 使用 Weighted Rendezvous Hash，不维护 session → provider 持久映射。
-
-默认 `auto` 会尝试：
-
-- metadata 中的 `session_id` / `sessionId` / `trace_id`
-- `X-Claude-Code-Session-Id`
-- `X-Session-Id`
-- `Session-Id`
-- `X-Request-Id`
-
-也可指定自定义 Header。
+不会返回 API secret / OAuth token。
 
 ## 安装
 
-### CPA Plugin Store
+### 通过 CPA Plugin Store
 
-将自定义源加入 CPA：
+将自定义插件源加入 CPA 配置：
 
 ```yaml
 plugins:
@@ -211,19 +246,14 @@ plugins:
     - "https://raw.githubusercontent.com/kitdine/cpa-plugin-key-chain-router/main/registry.json"
 ```
 
-重载 CPA 后，在 Plugin Store 搜索 **Key Chain Router** 并安装。Release 使用 CPA 要求的：
-
-```text
-key-chain-router_<version>_linux_amd64.zip
-checksums.txt
-```
+重载 CPA 后，在 Plugin Store 搜索 **Key Chain Router** 并安装。
 
 ### 手工安装
 
-将 Release 中：
+从 GitHub Releases 下载：
 
 ```text
-key-chain-router-v0.6.3.so
+key-chain-router-v<version>.so
 ```
 
 放入：
@@ -232,17 +262,63 @@ key-chain-router-v0.6.3.so
 plugins/linux/amd64/
 ```
 
-配置示例见 `config.example.yaml`，然后重启 CPA。
+然后重启 CPA。
 
-管理页：
+Release 同时提供 CPA Plugin Store 使用的：
+
+```text
+key-chain-router_<version>_linux_amd64.zip
+checksums.txt
+```
+
+## 配置与使用
+
+安装后进入管理页：
 
 ```text
 /v0/resource/plugins/key-chain-router/status
 ```
 
-## 开发 / CI
+典型操作流程：
 
-GitHub Actions 使用 `golang:1.26-bookworm`，执行：
+1. 保证下游 API Key 已存在于 CPA 原生 `api-keys`。
+2. 在 KCR 中为该 API Key 创建唯一 Policy。
+3. 给 Policy 添加按 Model 匹配的 Rule。
+4. 为 Rule 添加 OAuth / API credential 候选。
+5. 设置 Strategy、Priority / Weight、Failover 和可选 Override Model。
+6. 保存后通过诊断页检查 Rule 命中和候选关系。
+7. 在“路由记录”中观察最终候选、Attempts 和选择原因。
+
+配置示例见：
+
+```text
+config.example.yaml
+```
+
+## 安全边界
+
+- KCR 不接管 CPA 下游认证；API Key 必须仍存在于 CPA 原生 `api-keys`。
+- State 只保存下游 Key 的 SHA-256 fingerprint / hint，不保存明文 Key。
+- Credential 选择通过一次性内部 ticket 完成。
+- 无法唯一解析 AuthID 时 fail closed。
+- 管理资源页应只暴露在可信网络。
+- Memory / SQLite / logging 等可观测性故障不得影响模型路由。
+
+## 开发与 CI
+
+源码核心位于：
+
+```text
+src/
+```
+
+构建脚本：
+
+```text
+scripts/build.sh
+```
+
+标准 CI 使用 `golang:1.26-bookworm`，执行：
 
 ```text
 go test ./...
@@ -254,7 +330,7 @@ binary inspection
 artifact packaging
 ```
 
-正式 Release 自动输出：
+正式 Release 输出：
 
 ```text
 key-chain-router-vX.Y.Z.so
@@ -265,9 +341,4 @@ key-chain-router_X.Y.Z_linux_amd64.zip
 checksums.txt
 ```
 
-## 安全边界
-
-- 插件不接管 CPA 下游认证；API Key 必须仍存在于 CPA 原生 `api-keys`。
-- state 只保存下游 Key 的 SHA-256 fingerprint / hint，不保存明文 Key。
-- 插件资源页应仅暴露在可信网络。
-- SQLite/内存/logging 失败不得影响模型路由。
+发布历史与版本变更请查看 `CHANGELOG.md` 和 GitHub Releases。
