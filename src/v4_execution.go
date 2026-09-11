@@ -358,11 +358,13 @@ func runStreamPolicyV4(trace string, p *Policy, r *PolicyRule, ranked []*PolicyC
 			if rr.Error != "" {
 				_ = closeHostStream(sr.StreamID)
 				lastErr = errors.New(rr.Error)
-				recordCandidateFailureV4(p, r, c, 0, lastErr, sr.Headers, probe)
+				streamStatus := statusFromError(lastErr)
+				recordCandidateFailureV4(p, r, c, streamStatus, lastErr, sr.Headers, probe)
 				clearProbeOwnershipV4(&activeProbe)
 				if first {
 					event.Attempts[len(event.Attempts)-1].Error = rr.Error
-					action := failureActionV4(r.Failover, 0, lastErr)
+					event.Attempts[len(event.Attempts)-1].Status = streamStatus
+					action := failureActionV4(r.Failover, streamStatus, lastErr)
 					if action == failCPADefault {
 						runCPADefaultStreamV4(event, source, clientModel, body, headers, query, alt, callbackID, outStreamID, started)
 						return

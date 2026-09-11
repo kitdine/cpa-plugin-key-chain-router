@@ -354,3 +354,30 @@ func TestIssue13ResolvedProbeOwnershipCannotReleaseLaterProbe(t *testing.T) {
 		t.Fatal("stale resolved ownership released a later probe lease")
 	}
 }
+
+func TestIssue13StreamErrorStatusClassification(t *testing.T) {
+	resetIssue13Health(t)
+	p, r, ranked := issue13Fixture()
+	a := ranked[0]
+
+	notFound := errors.New("stream read failed: upstream status 404")
+	status := statusFromError(notFound)
+	if status != 404 {
+		t.Fatalf("statusFromError(404)=%d, want 404", status)
+	}
+	recordCandidateFailureV4(p, r, a, status, notFound, nil)
+	if view := candidateHealthViewV4(p, r, a); view.State != healthClosed {
+		t.Fatalf("request-specific 404 must not open circuit: %#v", view)
+	}
+
+	rateLimited := errors.New("stream read failed: HTTP 429 rate limited")
+	status = statusFromError(rateLimited)
+	if status != 429 {
+		t.Fatalf("statusFromError(429)=%d, want 429", status)
+	}
+	recordCandidateFailureV4(p, r, a, status, rateLimited, nil)
+	view := candidateHealthViewV4(p, r, a)
+	if view.State != healthOpen {
+		t.Fatalf("429 must open circuit: %#v", view)
+	}
+}
