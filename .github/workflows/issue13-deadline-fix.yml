@@ -1,0 +1,106 @@
+name: Issue 13 Deadline Preservation Fix
+
+on:
+  push:
+    branches:
+      - fix/issue-13-health-aware-failback
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: "!contains(github.event.head_commit.message, '[issue-13-deadline-done]')"
+    runs-on: ubuntu-latest
+    container:
+      image: golang:1.26-bookworm
+    steps:
+      - name: Install tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git build-essential python3 nodejs ca-certificates file binutils zip
+          rm -rf /var/lib/apt/lists/*
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/issue-13-health-aware-failback
+          fetch-depth: 0
+      - name: Preserve longer recovery deadlines
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('src/v4_health.go')
+          s = p.read_text()
+          old = '''\tcase isProbe:\n\t\t// Only a failed half-open recovery probe advances exponential backoff.\n\t\th.BackoffLevel = level\n\t\th.State = healthOpen\n\t\th.ProbeInFlight = false\n\t\th.OpenedAt = now\n\t\th.NextProbeAt = proposedDeadline\n'''
+          new = '''\tcase isProbe:\n\t\t// Only a failed half-open recovery probe advances exponential backoff.\n\t\t// Preserve a stronger deadline that may have been extended by a stale\n\t\t// 401/403/429 response while this probe was in flight.\n\t\th.BackoffLevel = level\n\t\th.State = healthOpen\n\t\th.ProbeInFlight = false\n\t\th.OpenedAt = now\n\t\tif h.NextProbeAt.IsZero() || proposedDeadline.After(h.NextProbeAt) {\n\t\t\th.NextProbeAt = proposedDeadline\n\t\t}\n'''
+          if s.count(old) != 1:
+              raise SystemExit(f'expected one probe block, got {s.count(old)}')
+          p.write_text(s.replace(old, new, 1))
+
+          t = Path('src/issue13_health_test.go')
+          ts = t.read_text()
+          marker = 'TestIssue13ProbeFailurePreservesLongerExistingDeadline'
+          if marker not in ts:
+              ts += r'''
+
+func TestIssue13ProbeFailurePreservesLongerExistingDeadline(t *testing.T) {
+	resetIssue13Health(t)
+	p, r, ranked := issue13Fixture()
+	a := ranked[0]
+
+	// Open A, then allow a half-open probe.
+	recordCandidateFailureV4(p, r, a, 503, nil, nil)
+	key := candidateHealthKeyV4(p, r, a)
+	v4Runtime.Lock()
+	v4Runtime.health[key].NextProbeAt = time.Now().Add(-time.Millisecond)
+	v4Runtime.Unlock()
+	if got, probe := nextHealthyCandidateV4(p, r, ranked, map[string]bool{}, failNext, int(^uint(0)>>1)); got == nil || got.ID != "a" || !probe {
+		t.Fatalf("expected half-open A probe, got=%v probe=%v", got, probe)
+	}
+
+	// A stale normal request receives a longer Retry-After while the probe is in flight.
+	recordCandidateFailureV4(p, r, a, 429, nil, http.Header{"Retry-After": []string{"240"}}, false)
+	v4Runtime.RLock()
+	longDeadline := v4Runtime.health[key].NextProbeAt
+	v4Runtime.RUnlock()
+	if time.Until(longDeadline) < 230*time.Second {
+		t.Fatalf("stale 429 did not establish long deadline: %v", longDeadline)
+	}
+
+	// The probe then fails with a transient 503. Its shorter exponential backoff
+	// must not overwrite the longer Retry-After deadline.
+	recordCandidateFailureV4(p, r, a, 503, nil, nil, true)
+	v4Runtime.RLock()
+	gotDeadline := v4Runtime.health[key].NextProbeAt
+	v4Runtime.RUnlock()
+	if gotDeadline.Before(longDeadline) {
+		t.Fatalf("probe failure shortened deadline: got=%v want>=%v", gotDeadline, longDeadline)
+	}
+}
+'''
+              t.write_text(ts)
+          PY
+      - name: Format and test
+        run: |
+          gofmt -w src/v4_health.go src/issue13_health_test.go
+          cd src
+          go test ./...
+          go vet ./...
+          node --check ui.js
+      - name: Build and ABI smoke
+        run: |
+          bash ./scripts/build.sh
+          VERSION="$(tr -d '[:space:]' < VERSION)"
+          cd src
+          python3 abi_smoke.py "../dist/key-chain-router-v${VERSION}.so"
+      - name: Commit reviewed fix and remove helper
+        run: |
+          ROOT="$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "$ROOT"
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          rm -f "$ROOT/.github/workflows/issue13-deadline-fix.yml"
+          git -C "$ROOT" add -A
+          git -C "$ROOT" diff --cached --check
+          git -C "$ROOT" commit -m 'fix: preserve stronger failback recovery deadline (#13) [issue-13-deadline-done]'
+          git -C "$ROOT" pull --rebase origin fix/issue-13-health-aware-failback
+          git -C "$ROOT" push origin HEAD:fix/issue-13-health-aware-failback
