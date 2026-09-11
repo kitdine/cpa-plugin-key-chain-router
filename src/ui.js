@@ -456,9 +456,12 @@ function renderAttempt(e, a, i) {
 
 function fmtEventTime(at) {
   if (!at) return '-';
-  const s = String(at);
-  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}:\d{2}:\d{2})/);
-  return m ? m[2] + '-' + m[3] + ' ' + m[4] : s;
+  const raw = String(at);
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) return raw;
+  const pad = (n) => String(n).padStart(2, '0');
+  return pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' +
+    pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
 }
 
 function eventState(e) {
@@ -539,7 +542,7 @@ function renderEvents() {
   }).join('');
 
   $('events').innerHTML = '<div class="event-table-wrap"><table class="event-table"><thead><tr>' +
-    '<th></th><th>时间</th><th>Model</th><th>Policy / Rule</th><th>Strategy</th><th>最终候选</th><th>Provider</th><th>状态</th><th>耗时</th><th>Attempts</th>' +
+    '<th></th><th>时间（本地）</th><th>Model</th><th>Policy / Rule</th><th>Strategy</th><th>最终候选</th><th>Provider</th><th>状态</th><th>耗时</th><th>Attempts</th>' +
     '</tr></thead><tbody>' + rows + '</tbody></table></div>';
 }
 

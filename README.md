@@ -1,8 +1,12 @@
-# CPA Key Chain Router v0.6.2
+# CPA Key Chain Router v0.6.3
 
 CLIProxyAPI（CPA）v7 动态策略路由插件。保留 CPA 原生下游 `api-keys` 认证、usage 和请求监控，仅在认证后根据下游 API Key、模型和策略选择上游 OAuth / API credential。
 
 当前重点兼容：CLIProxyAPI v7.2.154（schema 5）、Linux amd64 / Debian Bookworm 类环境。
+
+## v0.6.3 浏览器本地时间
+
+路由事件在后端和 SQLite 中仍以 UTC RFC3339 保存；管理页“路由记录”的时间列会在浏览器端转换为当前浏览器本地时区，并以 `MM-DD HH:mm:ss` 展示。鼠标悬停保留原始 UTC 时间。这样不同地区访问同一个 CPA 实例时，各自看到符合本地时区的列表时间，同时数据库与筛选逻辑保持统一 UTC 语义。
 
 ## v0.6.2 SQLite 持久化修复
 
@@ -219,7 +223,7 @@ checksums.txt
 将 Release 中：
 
 ```text
-key-chain-router-v0.6.2.so
+key-chain-router-v0.6.3.so
 ```
 
 放入：
