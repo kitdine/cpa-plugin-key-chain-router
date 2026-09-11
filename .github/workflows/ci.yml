@@ -60,7 +60,7 @@ jobs:
           mkdir -p package
           cp "dist/key-chain-router-v${VERSION}.so" package/
           cp dist/key-chain-router.so package/
-          cp README.md TESTING.md config.example.yaml package/
+          cp README.md config.example.yaml package/
           (cd package && sha256sum "key-chain-router-v${VERSION}.so" key-chain-router.so > SHA256SUMS)
           tar -C package -czf "key-chain-router-v${VERSION}-linux-amd64.tar.gz" .
 
