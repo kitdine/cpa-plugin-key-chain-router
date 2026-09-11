@@ -1,0 +1,140 @@
+name: Issue 13 Active Probe Ownership Fix
+
+on:
+  push:
+    branches:
+      - fix/issue-13-health-aware-failback
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: "!contains(github.event.head_commit.message, '[issue-13-active-probe-done]')"
+    runs-on: ubuntu-latest
+    container:
+      image: golang:1.26-bookworm
+    steps:
+      - name: Install tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git build-essential python3 nodejs ca-certificates file binutils zip
+          rm -rf /var/lib/apt/lists/*
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/issue-13-health-aware-failback
+          fetch-depth: 0
+      - name: Apply active probe ownership fix
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          hp = Path('src/v4_health.go')
+          hs = hp.read_text()
+          helper = '''func clearProbeOwnershipV4(owned *bool) {\n\tif owned != nil {\n\t\t*owned = false\n\t}\n}\n\n'''
+          marker = 'func releaseCandidateProbeV4('
+          if 'func clearProbeOwnershipV4(' not in hs:
+              if marker not in hs:
+                  raise SystemExit('releaseCandidateProbeV4 marker not found')
+              hs = hs.replace(marker, helper + marker, 1)
+          hp.write_text(hs)
+
+          ep = Path('src/v4_execution.go')
+          es = ep.read_text()
+          start = es.index('func runStreamPolicyV4(')
+          end = es.index('\nfunc runCPADefaultStreamV4(', start)
+          seg = es[start:end]
+
+          failure_pattern = re.compile(r'(?m)^(\s*)(recordCandidateFailureV4\(p, r, c,.*\))$')
+          success_pattern = re.compile(r'(?m)^(\s*)(recordCandidateSuccessV4\(p, r, c, probe\))$')
+          release_pattern = re.compile(r'(?m)^(\s*)(releaseCandidateProbeV4\(p, r, c, probe\))$')
+
+          def add_clear(m):
+              indent, call = m.group(1), m.group(2)
+              return f'{indent}{call}\n{indent}clearProbeOwnershipV4(&activeProbe)'
+
+          seg, nf = failure_pattern.subn(add_clear, seg)
+          seg, ns = success_pattern.subn(add_clear, seg)
+          seg, nr = release_pattern.subn(add_clear, seg)
+          if nf < 4:
+              raise SystemExit(f'expected >=4 stream failure health resolutions, got {nf}')
+          if ns != 1:
+              raise SystemExit(f'expected exactly 1 stream success resolution, got {ns}')
+          if nr != 1:
+              raise SystemExit(f'expected exactly 1 stream local release, got {nr}')
+
+          es = es[:start] + seg + es[end:]
+          ep.write_text(es)
+
+          tp = Path('src/issue13_health_test.go')
+          ts = tp.read_text()
+          if 'TestIssue13ResolvedProbeOwnershipCannotReleaseLaterProbe' not in ts:
+              ts += r'''
+
+func TestIssue13ResolvedProbeOwnershipCannotReleaseLaterProbe(t *testing.T) {
+	resetIssue13Health(t)
+	p, r, ranked := issue13Fixture()
+	a := ranked[0]
+	key := candidateHealthKeyV4(p, r, a)
+
+	// Probe #1 is acquired and then resolved as a failed probe.
+	recordCandidateFailureV4(p, r, a, 503, nil, nil)
+	v4Runtime.Lock()
+	v4Runtime.health[key].NextProbeAt = time.Now().Add(-time.Millisecond)
+	v4Runtime.Unlock()
+	_, owned := nextHealthyCandidateV4(p, r, ranked, map[string]bool{}, failNext, int(^uint(0)>>1))
+	if !owned {
+		t.Fatal("expected first half-open probe ownership")
+	}
+	recordCandidateFailureV4(p, r, a, 503, nil, nil, true)
+	clearProbeOwnershipV4(&owned)
+	if owned {
+		t.Fatal("resolved probe ownership remained active")
+	}
+
+	// Later, a different request acquires probe #2. Cleanup from the old attempt
+	// must be a no-op because its ownership flag was cleared at resolution time.
+	v4Runtime.Lock()
+	v4Runtime.health[key].NextProbeAt = time.Now().Add(-time.Millisecond)
+	v4Runtime.Unlock()
+	_, second := nextHealthyCandidateV4(p, r, ranked, map[string]bool{}, failNext, int(^uint(0)>>1))
+	if !second {
+		t.Fatal("expected second half-open probe ownership")
+	}
+	releaseCandidateProbeV4(p, r, a, owned)
+	v4Runtime.RLock()
+	stillInFlight := v4Runtime.health[key].ProbeInFlight
+	v4Runtime.RUnlock()
+	if !stillInFlight {
+		t.Fatal("stale resolved ownership released a later probe lease")
+	}
+}
+'''
+          tp.write_text(ts)
+          PY
+      - name: Format and test
+        run: |
+          gofmt -w src/v4_health.go src/v4_execution.go src/issue13_health_test.go
+          cd src
+          go test ./...
+          go vet ./...
+          node --check ui.js
+      - name: Build and ABI smoke
+        run: |
+          bash ./scripts/build.sh
+          VERSION="$(tr -d '[:space:]' < VERSION)"
+          cd src
+          python3 abi_smoke.py "../dist/key-chain-router-v${VERSION}.so"
+      - name: Commit fix and remove helper
+        run: |
+          ROOT="$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "$ROOT"
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          rm -f "$ROOT/.github/workflows/issue13-active-probe-fix.yml"
+          git -C "$ROOT" add -A
+          git -C "$ROOT" diff --cached --check
+          git -C "$ROOT" commit -m 'fix: clear resolved stream probe ownership (#13) [issue-13-active-probe-done]'
+          git -C "$ROOT" pull --rebase origin fix/issue-13-health-aware-failback
+          git -C "$ROOT" push origin HEAD:fix/issue-13-health-aware-failback
