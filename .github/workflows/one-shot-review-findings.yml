@@ -22,6 +22,16 @@ jobs:
         run: |
           python3 scripts/review_findings_patch2.py
           python3 scripts/review_findings_patch.py
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('src/v4_observability.go')
+          s = p.read_text()
+          old = '\ts := &sqliteSink{db: db, path: path, ch: make(chan RoutingEvent, 1024), stop: make(chan struct{}), done: make(chan struct{}), cfg: cfg}\n\tgo s.loop()\n\treturn s, nil\n'
+          new = '\ts := &sqliteSink{db: db, path: path, ch: make(chan RoutingEvent, 1024), stop: make(chan struct{}), done: make(chan struct{}), cfg: cfg}\n\tgo s.loop()\n\trecordSQLiteOpenV62(path)\n\treturn s, nil\n'
+          if old not in s:
+              raise SystemExit('sqlite constructor return block not found after main patch')
+          p.write_text(s.replace(old, new, 1))
+          PY
 
       - name: Validate
         run: |
