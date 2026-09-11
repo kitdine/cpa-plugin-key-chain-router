@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.6.7 - 2026-09-11
+
+修复 v0.6.6 Health-aware Failover 在 `plugin.reconfigure` / credential rotation 场景下的 runtime generation 竞态，避免旧 credential 的在途请求在重载后污染新 runtime 的 circuit health。
+
+### Runtime generation 隔离
+
+- 每次 `configureV4` / `plugin.reconfigure` 都推进 runtime generation，即使序列化后的 Policy、Provider、AuthIndex 等字段完全不变，也能识别新旧 runtime。
+- candidate acquisition 在持有 runtime lock 时原子捕获 generation，并将其绑定到本次 attempt 的私有 candidate clone，不修改共享 Policy candidate。
+- success、failure 与 probe-release 三类 health 回写统一校验 attempt generation；旧 generation 的迟到结果直接丢弃。
+- 保留既有 candidate 结构比较，用于识别 `save_policy` 后被替换的 candidate 配置；generation 与结构校验共同构成 health 写回门禁。
+
+### 回归测试与 Review
+
+- 新增同内容 Policy 重载场景：旧 generation 请求迟到返回 503 时，不得重新创建 OPEN；新 generation 请求仍可正常更新 circuit state。
+- 新增旧 HALF_OPEN probe 场景：reconfigure 后 stale probe-release / success / failure 均不能修改新 generation 的 probe/circuit state。
+- PR #16 已通过 Go test、Go vet、JavaScript syntax、Linux amd64 c-shared build、ABI smoke、binary inspection 与 artifact packaging。
+- PR #14 原 Codex P2 generation finding 已由 #16 修复并 resolve。
+
+关联：PR #14、PR #16。
+
 ## v0.6.6 - 2026-09-11
 
 新增 Health-aware Failover 与自动 Failback，使首选候选 A 发生持续故障后，后续请求不会反复先撞 A 再切到 B；A 恢复后通过受控探测自动回到原策略排序。
