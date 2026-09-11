@@ -19,7 +19,9 @@ jobs:
           fetch-depth: 0
 
       - name: Apply patch
-        run: python3 scripts/review_findings_patch.py
+        run: |
+          python3 scripts/review_findings_patch2.py
+          python3 scripts/review_findings_patch.py
 
       - name: Validate
         run: |
@@ -34,7 +36,7 @@ jobs:
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git rm .github/workflows/one-shot-review-findings.yml scripts/review_findings_patch.py
+          git rm .github/workflows/one-shot-review-findings.yml scripts/review_findings_patch.py scripts/review_findings_patch2.py
           git add src/main.go src/scheduler_auth.go src/v4_types.go src/v4_execution.go src/v4_observability.go src/v062_sqlite_query.go src/ui.js src/review_findings_test.go
           git commit -m 'fix: resolve outstanding review findings'
           git push origin HEAD:fix/review-findings-v0.6.4
