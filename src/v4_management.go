@@ -480,8 +480,15 @@ func diagnosePolicyV4(fp, model string) map[string]any {
 	}
 	ranked := rankCandidatesV4(p, rule, http.Header{}, map[string]any{})
 	items := []map[string]any{}
+	now := time.Now()
+	effectiveFound := false
 	for i, c := range ranked {
-		items = append(items, map[string]any{"order": i + 1, "name": c.Name, "provider": c.Provider, "auth_index": c.AuthIndex, "priority": c.Priority, "weight": c.Weight, "override_model": c.OverrideModel, "health": candidateHealthViewV4(p, rule, c)})
+		selectable := candidateWouldBeSelectableV4(p, rule, c, now)
+		effective := selectable && !effectiveFound
+		if effective {
+			effectiveFound = true
+		}
+		items = append(items, map[string]any{"order": i + 1, "name": c.Name, "provider": c.Provider, "auth_index": c.AuthIndex, "priority": c.Priority, "weight": c.Weight, "override_model": c.OverrideModel, "health": candidateHealthViewV4(p, rule, c), "selectable": selectable, "effective": effective})
 	}
 	decision := decisionHandled
 	if rule.Strategy == strategyCPADefault {

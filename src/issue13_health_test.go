@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 )
@@ -457,5 +458,23 @@ func TestIssue13SupersededCandidateResultsCannotRecreateHealth(t *testing.T) {
 	v4Runtime.RUnlock()
 	if current == nil || current.State != healthOpen {
 		t.Fatalf("current replacement candidate failure was ignored: %#v", current)
+	}
+}
+
+func TestIssue13HealthSkipReasonExplainsActualSelection(t *testing.T) {
+	resetIssue13Health(t)
+	p, r, ranked := issue13Fixture()
+	recordCandidateFailureV4(p, r, ranked[0], 503, nil, nil)
+	c, probe, skips := nextHealthyCandidateWithSkipsV4(p, r, ranked, map[string]bool{}, failNext, int(^uint(0)>>1))
+	if c == nil || c.ID != "b" || probe {
+		t.Fatalf("got candidate=%v probe=%v, want healthy B", c, probe)
+	}
+	if len(skips) != 1 || !strings.Contains(skips[0], "A") || !strings.Contains(skips[0], "OPEN") {
+		t.Fatalf("health skips=%#v, want A OPEN explanation", skips)
+	}
+	ev := RoutingEvent{Attempts: []attemptResult{{Candidate: c.Name, Provider: c.Provider, AuthIndex: c.AuthIndex}}, ruleSnapshot: cloneRuleV4(r), healthSkips: [][]string{skips}}
+	enrichRoutingSelectionReasonsV6(&ev)
+	if len(ev.SelectionReasons) != 1 || !strings.Contains(ev.SelectionReasons[0], "健康过滤") || !strings.Contains(ev.SelectionReasons[0], "A") || !strings.Contains(ev.SelectionReasons[0], "B") {
+		t.Fatalf("selection reason=%#v, want health-aware A->B explanation", ev.SelectionReasons)
 	}
 }

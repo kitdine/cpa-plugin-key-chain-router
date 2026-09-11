@@ -22,11 +22,12 @@ func runNonStreamPolicyV4(trace string, p *Policy, r *PolicyRule, ranked []*Poli
 		max = len(ranked) + 1
 	}
 	for len(event.Attempts) < max {
-		c, probe := nextHealthyCandidateV4(p, r, ranked, attempted, nextAction, currentPriority)
+		c, probe, healthSkips := nextHealthyCandidateWithSkipsV4(p, r, ranked, attempted, nextAction, currentPriority)
 		nextAction = failNext
 		if c == nil {
 			break
 		}
+		event.healthSkips = append(event.healthSkips, healthSkips)
 		attempted[c.ID] = true
 		currentPriority = c.Priority
 		resp, ar, err := executeCandidateV4(c, source, clientModel, body, headers, query, alt, callbackID, false)
@@ -226,11 +227,12 @@ func runStreamPolicyV4(trace string, p *Policy, r *PolicyRule, ranked []*PolicyC
 		}
 	}()
 	for len(event.Attempts) < max {
-		c, probe := nextHealthyCandidateV4(p, r, ranked, attempted, nextAction, currentPriority)
+		c, probe, healthSkips := nextHealthyCandidateWithSkipsV4(p, r, ranked, attempted, nextAction, currentPriority)
 		nextAction = failNext
 		if c == nil {
 			break
 		}
+		event.healthSkips = append(event.healthSkips, healthSkips)
 		activeCandidate = c
 		activeProbe = probe
 		attempted[c.ID] = true

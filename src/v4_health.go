@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
 	"sort"
 	"strconv"
@@ -123,29 +124,42 @@ func candidateWouldBeSelectableV4(p *Policy, r *PolicyRule, c *PolicyCandidate, 
 	return state == healthHalfOpen
 }
 
-func acquireCandidateHealthV4(p *Policy, r *PolicyRule, c *PolicyCandidate, now time.Time) (bool, bool) {
+func acquireCandidateHealthWithReasonV4(p *Policy, r *PolicyRule, c *PolicyCandidate, now time.Time) (bool, bool, string) {
 	key := candidateHealthKeyV4(p, r, c)
 	if key == "" {
-		return true, false
+		return true, false, ""
 	}
 	v4Runtime.Lock()
 	defer v4Runtime.Unlock()
 	if !candidateHealthConfigCurrentLockedV4(p, r, c) {
-		return true, false
+		return true, false, ""
 	}
 	h := candidateHealthStateLockedV4(key)
 	if h.State == healthClosed {
-		return true, false
+		return true, false, ""
+	}
+	name := strings.TrimSpace(c.Name)
+	if name == "" {
+		name = c.ID
 	}
 	if h.ProbeInFlight {
-		return false, false
+		return false, false, fmt.Sprintf("候选 %s 健康状态=%s，已有恢复探测正在执行，跳过", name, h.State)
 	}
 	if h.State == healthOpen && !h.NextProbeAt.IsZero() && now.Before(h.NextProbeAt) {
-		return false, false
+		retryMs := h.NextProbeAt.Sub(now).Milliseconds()
+		if retryMs < 0 {
+			retryMs = 0
+		}
+		return false, false, fmt.Sprintf("候选 %s 健康状态=OPEN，约 %dms 后允许恢复探测，跳过", name, retryMs)
 	}
 	h.State = healthHalfOpen
 	h.ProbeInFlight = true
-	return true, true
+	return true, true, ""
+}
+
+func acquireCandidateHealthV4(p *Policy, r *PolicyRule, c *PolicyCandidate, now time.Time) (bool, bool) {
+	ok, probe, _ := acquireCandidateHealthWithReasonV4(p, r, c, now)
+	return ok, probe
 }
 
 func candidateMatchesFailoverActionV4(c *PolicyCandidate, action string, currentPriority int, phase int) bool {
@@ -165,7 +179,7 @@ func candidateMatchesFailoverActionV4(c *PolicyCandidate, action string, current
 	}
 }
 
-func chooseHealthyCandidateV4(p *Policy, r *PolicyRule, ranked []*PolicyCandidate, attempted map[string]bool, action string, currentPriority int, acquire bool) (*PolicyCandidate, bool) {
+func chooseHealthyCandidateV4(p *Policy, r *PolicyRule, ranked []*PolicyCandidate, attempted map[string]bool, action string, currentPriority int, acquire bool, healthSkips *[]string) (*PolicyCandidate, bool) {
 	phases := 1
 	if action == failSamePriorityFirst {
 		phases = 2
@@ -177,8 +191,12 @@ func chooseHealthyCandidateV4(p *Policy, r *PolicyRule, ranked []*PolicyCandidat
 				continue
 			}
 			if acquire {
-				if ok, probe := acquireCandidateHealthV4(p, r, c, now); ok {
+				ok, probe, skipReason := acquireCandidateHealthWithReasonV4(p, r, c, now)
+				if ok {
 					return c, probe
+				}
+				if healthSkips != nil && skipReason != "" {
+					*healthSkips = append(*healthSkips, skipReason)
 				}
 			} else if candidateWouldBeSelectableV4(p, r, c, now) {
 				return c, false
@@ -189,11 +207,17 @@ func chooseHealthyCandidateV4(p *Policy, r *PolicyRule, ranked []*PolicyCandidat
 }
 
 func nextHealthyCandidateV4(p *Policy, r *PolicyRule, ranked []*PolicyCandidate, attempted map[string]bool, action string, currentPriority int) (*PolicyCandidate, bool) {
-	return chooseHealthyCandidateV4(p, r, ranked, attempted, action, currentPriority, true)
+	return chooseHealthyCandidateV4(p, r, ranked, attempted, action, currentPriority, true, nil)
+}
+
+func nextHealthyCandidateWithSkipsV4(p *Policy, r *PolicyRule, ranked []*PolicyCandidate, attempted map[string]bool, action string, currentPriority int) (*PolicyCandidate, bool, []string) {
+	skips := []string{}
+	c, probe := chooseHealthyCandidateV4(p, r, ranked, attempted, action, currentPriority, true, &skips)
+	return c, probe, skips
 }
 
 func peekHealthyCandidateV4(p *Policy, r *PolicyRule, ranked []*PolicyCandidate, attempted map[string]bool, action string, currentPriority int) *PolicyCandidate {
-	c, _ := chooseHealthyCandidateV4(p, r, ranked, attempted, action, currentPriority, false)
+	c, _ := chooseHealthyCandidateV4(p, r, ranked, attempted, action, currentPriority, false, nil)
 	return c
 }
 

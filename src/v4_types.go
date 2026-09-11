@@ -117,6 +117,7 @@ type RoutingEvent struct {
 	Success          bool            `json:"success"`
 	Error            string          `json:"error,omitempty"`
 	ruleSnapshot     *PolicyRule
+	healthSkips      [][]string
 }
 
 type sqliteSink struct {
