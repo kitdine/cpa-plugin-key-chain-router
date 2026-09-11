@@ -15,13 +15,15 @@ func runNonStreamPolicyV4(trace string, p *Policy, r *PolicyRule, ranked []*Poli
 	event := RoutingEvent{TraceID: trace, At: nowV4(), Decision: decisionHandled, PolicyName: p.Name, KeyFingerprint: p.KeyFingerprint, KeyHint: p.KeyHint, RuleID: r.ID, RuleName: r.Name, Strategy: r.Strategy, Model: clientModel, Stream: false, ruleSnapshot: cloneRuleV4(r)}
 	attempted := map[string]bool{}
 	currentPriority := math.MaxInt
+	nextAction := failNext
 	var lastErr error
 	max := r.Failover.MaxAttempts
 	if max <= 0 {
 		max = len(ranked) + 1
 	}
 	for len(event.Attempts) < max {
-		c, probe := nextHealthyCandidateV4(p, r, ranked, attempted, failNext, currentPriority)
+		c, probe := nextHealthyCandidateV4(p, r, ranked, attempted, nextAction, currentPriority)
+		nextAction = failNext
 		if c == nil {
 			break
 		}
@@ -52,11 +54,7 @@ func runNonStreamPolicyV4(trace string, p *Policy, r *PolicyRule, ranked []*Poli
 		if action == failStop {
 			break
 		}
-		next := peekHealthyCandidateV4(p, r, ranked, attempted, action, currentPriority)
-		if next == nil {
-			break
-		}
-		ranked = moveCandidateFirstV4(ranked, next.ID)
+		nextAction = action
 	}
 	if r.Failover.Exhausted == failCPADefault {
 		return executeCPADefaultV4(event, source, clientModel, body, headers, query, alt, callbackID, started)
@@ -212,6 +210,7 @@ func runStreamPolicyV4(trace string, p *Policy, r *PolicyRule, ranked []*PolicyC
 	event := RoutingEvent{TraceID: trace, At: nowV4(), Decision: decisionHandled, PolicyName: p.Name, KeyFingerprint: p.KeyFingerprint, KeyHint: p.KeyHint, RuleID: r.ID, RuleName: r.Name, Strategy: r.Strategy, Model: clientModel, Stream: true, ruleSnapshot: cloneRuleV4(r)}
 	attempted := map[string]bool{}
 	currentPriority := math.MaxInt
+	nextAction := failNext
 	max := r.Failover.MaxAttempts
 	if max <= 0 {
 		max = len(ranked)
@@ -223,7 +222,8 @@ func runStreamPolicyV4(trace string, p *Policy, r *PolicyRule, ranked []*PolicyC
 		}
 	}()
 	for len(event.Attempts) < max {
-		c, probe := nextHealthyCandidateV4(p, r, ranked, attempted, failNext, currentPriority)
+		c, probe := nextHealthyCandidateV4(p, r, ranked, attempted, nextAction, currentPriority)
+		nextAction = failNext
 		if c == nil {
 			break
 		}
@@ -259,11 +259,7 @@ func runStreamPolicyV4(trace string, p *Policy, r *PolicyRule, ranked []*PolicyC
 			if action == failStop {
 				break
 			}
-			next := peekHealthyCandidateV4(p, r, ranked, attempted, action, currentPriority)
-			if next == nil {
-				break
-			}
-			ranked = moveCandidateFirstV4(ranked, next.ID)
+			nextAction = action
 			continue
 		}
 		var sr hostModelStreamResponse
@@ -272,6 +268,15 @@ func runStreamPolicyV4(trace string, p *Policy, r *PolicyRule, ranked []*PolicyC
 			event.Attempts = append(event.Attempts, ar)
 			lastErr = err
 			recordCandidateFailureV4(p, r, c, 0, err, nil, probe)
+			action := failureActionV4(r.Failover, 0, err)
+			if action == failCPADefault {
+				runCPADefaultStreamV4(event, source, clientModel, body, headers, query, alt, callbackID, outStreamID, started)
+				return
+			}
+			if action == failStop {
+				break
+			}
+			nextAction = action
 			continue
 		}
 		ar.Status = sr.StatusCode
@@ -291,20 +296,26 @@ func runStreamPolicyV4(trace string, p *Policy, r *PolicyRule, ranked []*PolicyC
 			if action == failStop {
 				break
 			}
-			next := peekHealthyCandidateV4(p, r, ranked, attempted, action, currentPriority)
-			if next == nil {
-				break
-			}
-			ranked = moveCandidateFirstV4(ranked, next.ID)
+			nextAction = action
 			continue
 		}
 		if sr.StreamID == "" {
 			lastErr = errors.New("host stream id 为空")
 			event.Attempts[len(event.Attempts)-1].Error = lastErr.Error()
 			recordCandidateFailureV4(p, r, c, 0, lastErr, sr.Headers, probe)
+			action := failureActionV4(r.Failover, 0, lastErr)
+			if action == failCPADefault {
+				runCPADefaultStreamV4(event, source, clientModel, body, headers, query, alt, callbackID, outStreamID, started)
+				return
+			}
+			if action == failStop {
+				break
+			}
+			nextAction = action
 			continue
 		}
 		first := true
+		stopAfterFirstReadFailure := false
 		for {
 			rr, e := readHostStream(sr.StreamID)
 			if e != nil {
@@ -314,6 +325,16 @@ func runStreamPolicyV4(trace string, p *Policy, r *PolicyRule, ranked []*PolicyC
 				if first {
 					event.Attempts[len(event.Attempts)-1].Error = e.Error()
 					event.Attempts[len(event.Attempts)-1].Status = statusFromError(e)
+					action := failureActionV4(r.Failover, statusFromError(e), e)
+					if action == failCPADefault {
+						runCPADefaultStreamV4(event, source, clientModel, body, headers, query, alt, callbackID, outStreamID, started)
+						return
+					}
+					if action == failStop {
+						stopAfterFirstReadFailure = true
+					} else {
+						nextAction = action
+					}
 					break
 				}
 				event.Success = false
@@ -329,6 +350,16 @@ func runStreamPolicyV4(trace string, p *Policy, r *PolicyRule, ranked []*PolicyC
 				recordCandidateFailureV4(p, r, c, 0, lastErr, sr.Headers, probe)
 				if first {
 					event.Attempts[len(event.Attempts)-1].Error = rr.Error
+					action := failureActionV4(r.Failover, 0, lastErr)
+					if action == failCPADefault {
+						runCPADefaultStreamV4(event, source, clientModel, body, headers, query, alt, callbackID, outStreamID, started)
+						return
+					}
+					if action == failStop {
+						stopAfterFirstReadFailure = true
+					} else {
+						nextAction = action
+					}
 					break
 				}
 				event.Success = false
@@ -342,7 +373,7 @@ func runStreamPolicyV4(trace string, p *Policy, r *PolicyRule, ranked []*PolicyC
 				first = false
 				if e = emitOutput(outStreamID, rr.Payload); e != nil {
 					_ = closeHostStream(sr.StreamID)
-					releaseCandidateProbeV4(p, r, c)
+					releaseCandidateProbeV4(p, r, c, probe)
 					_ = closeOutputStream(outStreamID, e.Error())
 					return
 				}
@@ -360,6 +391,9 @@ func runStreamPolicyV4(trace string, p *Policy, r *PolicyRule, ranked []*PolicyC
 				_ = closeOutputStream(outStreamID, "")
 				return
 			}
+		}
+		if stopAfterFirstReadFailure {
+			break
 		}
 	}
 	if r.Failover.Exhausted == failCPADefault {

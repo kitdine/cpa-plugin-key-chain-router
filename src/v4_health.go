@@ -330,7 +330,10 @@ func recordCandidateSuccessV4(p *Policy, r *PolicyRule, c *PolicyCandidate) {
 	h.NextProbeAt = time.Time{}
 }
 
-func releaseCandidateProbeV4(p *Policy, r *PolicyRule, c *PolicyCandidate) {
+func releaseCandidateProbeV4(p *Policy, r *PolicyRule, c *PolicyCandidate, owned bool) {
+	if !owned {
+		return
+	}
 	key := candidateHealthKeyV4(p, r, c)
 	if key == "" {
 		return

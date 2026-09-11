@@ -211,3 +211,45 @@ func TestIssue13ProbeFailurePreservesLongerExistingDeadline(t *testing.T) {
 		t.Fatalf("probe failure shortened deadline: got=%v want>=%v", gotDeadline, longDeadline)
 	}
 }
+
+func TestIssue13ReleaseProbeRequiresOwnership(t *testing.T) {
+	resetIssue13Health(t)
+	p, r, ranked := issue13Fixture()
+	a := ranked[0]
+	recordCandidateFailureV4(p, r, a, 503, nil, nil)
+	key := candidateHealthKeyV4(p, r, a)
+	v4Runtime.Lock()
+	v4Runtime.health[key].NextProbeAt = time.Now().Add(-time.Millisecond)
+	v4Runtime.Unlock()
+	if got, probe := nextHealthyCandidateV4(p, r, ranked, map[string]bool{}, failNext, int(^uint(0)>>1)); got == nil || got.ID != "a" || !probe {
+		t.Fatalf("expected A probe, got=%v probe=%v", got, probe)
+	}
+	releaseCandidateProbeV4(p, r, a, false)
+	v4Runtime.RLock()
+	stillOwned := v4Runtime.health[key].ProbeInFlight
+	v4Runtime.RUnlock()
+	if !stillOwned {
+		t.Fatal("non-owner released another attempt probe lease")
+	}
+	releaseCandidateProbeV4(p, r, a, true)
+	v4Runtime.RLock()
+	released := !v4Runtime.health[key].ProbeInFlight
+	v4Runtime.RUnlock()
+	if !released {
+		t.Fatal("owner failed to release probe lease")
+	}
+}
+
+func TestIssue13NextPriorityAcquisitionNeverReturnsCurrentPriority(t *testing.T) {
+	resetIssue13Health(t)
+	p, r, ranked := issue13Fixture()
+	same := &PolicyCandidate{ID: "same", Name: "Same", Provider: "codex", AuthIndex: "idx-same", Enabled: true, Priority: 100, Weight: 1}
+	r.Candidates = []*PolicyCandidate{ranked[0], same, ranked[1]}
+	ranked = []*PolicyCandidate{ranked[0], same, ranked[1]}
+	attempted := map[string]bool{"a": true}
+	recordCandidateFailureV4(p, r, ranked[2], 503, nil, nil)
+	got, _ := nextHealthyCandidateV4(p, r, ranked, attempted, failNextPriority, 100)
+	if got != nil {
+		t.Fatalf("next-priority returned %s at priority %d; want nil while lower priority is unhealthy", got.ID, got.Priority)
+	}
+}
