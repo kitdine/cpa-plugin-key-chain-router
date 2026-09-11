@@ -70,7 +70,7 @@ func TestIssue13ProbeSuccessFailsBackToPreferredCandidate(t *testing.T) {
 		t.Fatalf("expected A probe, got=%v probe=%v", got, probe)
 	}
 
-	recordCandidateSuccessV4(p, r, a)
+	recordCandidateSuccessV4(p, r, a, true)
 	got, probe = nextHealthyCandidateV4(p, r, ranked, map[string]bool{}, failNext, int(^uint(0)>>1))
 	if got == nil || got.ID != "a" || probe {
 		t.Fatalf("after successful probe got=(%v, probe=%v), want normal A", got, probe)
@@ -251,5 +251,70 @@ func TestIssue13NextPriorityAcquisitionNeverReturnsCurrentPriority(t *testing.T)
 	got, _ := nextHealthyCandidateV4(p, r, ranked, attempted, failNextPriority, 100)
 	if got != nil {
 		t.Fatalf("next-priority returned %s at priority %d; want nil while lower priority is unhealthy", got.ID, got.Priority)
+	}
+}
+
+func TestIssue13StaleSuccessCannotCancelRecoveryCycle(t *testing.T) {
+	resetIssue13Health(t)
+	p, r, ranked := issue13Fixture()
+	a := ranked[0]
+	key := candidateHealthKeyV4(p, r, a)
+
+	recordCandidateFailureV4(p, r, a, 503, nil, nil)
+	recordCandidateSuccessV4(p, r, a, false)
+	v4Runtime.RLock()
+	openState := *v4Runtime.health[key]
+	v4Runtime.RUnlock()
+	if openState.State != healthOpen || openState.ProbeInFlight {
+		t.Fatalf("stale normal success cancelled OPEN state: %#v", openState)
+	}
+
+	v4Runtime.Lock()
+	v4Runtime.health[key].NextProbeAt = time.Now().Add(-time.Millisecond)
+	v4Runtime.Unlock()
+	got, probe := nextHealthyCandidateV4(p, r, ranked, map[string]bool{}, failNext, int(^uint(0)>>1))
+	if got == nil || got.ID != "a" || !probe {
+		t.Fatalf("expected A half-open probe, got=%v probe=%v", got, probe)
+	}
+
+	recordCandidateSuccessV4(p, r, a, false)
+	v4Runtime.RLock()
+	half := *v4Runtime.health[key]
+	v4Runtime.RUnlock()
+	if half.State != healthHalfOpen || !half.ProbeInFlight {
+		t.Fatalf("stale success cancelled HALF_OPEN probe: %#v", half)
+	}
+
+	recordCandidateSuccessV4(p, r, a, true)
+	v4Runtime.RLock()
+	closed := *v4Runtime.health[key]
+	v4Runtime.RUnlock()
+	if closed.State != healthClosed || closed.ProbeInFlight || closed.BackoffLevel != 0 {
+		t.Fatalf("probe owner did not close circuit: %#v", closed)
+	}
+}
+
+func TestIssue13ProbeReleasePreservesStrongerDeadline(t *testing.T) {
+	resetIssue13Health(t)
+	p, r, ranked := issue13Fixture()
+	a := ranked[0]
+	key := candidateHealthKeyV4(p, r, a)
+	recordCandidateFailureV4(p, r, a, 503, nil, nil)
+	v4Runtime.Lock()
+	v4Runtime.health[key].NextProbeAt = time.Now().Add(-time.Millisecond)
+	v4Runtime.Unlock()
+	if got, probe := nextHealthyCandidateV4(p, r, ranked, map[string]bool{}, failNext, int(^uint(0)>>1)); got == nil || !probe {
+		t.Fatalf("expected probe, got=%v probe=%v", got, probe)
+	}
+	recordCandidateFailureV4(p, r, a, 429, nil, http.Header{"Retry-After": []string{"240"}}, false)
+	v4Runtime.RLock()
+	strong := v4Runtime.health[key].NextProbeAt
+	v4Runtime.RUnlock()
+	releaseCandidateProbeV4(p, r, a, true)
+	v4Runtime.RLock()
+	after := v4Runtime.health[key].NextProbeAt
+	v4Runtime.RUnlock()
+	if after.Before(strong) {
+		t.Fatalf("probe release shortened stronger deadline: before=%v after=%v", strong, after)
 	}
 }

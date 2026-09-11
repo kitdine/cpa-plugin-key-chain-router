@@ -310,7 +310,7 @@ func recordCandidateFailureV4(p *Policy, r *PolicyRule, c *PolicyCandidate, stat
 	h.LastFailureAt = now
 }
 
-func recordCandidateSuccessV4(p *Policy, r *PolicyRule, c *PolicyCandidate) {
+func recordCandidateSuccessV4(p *Policy, r *PolicyRule, c *PolicyCandidate, probeOwned bool) {
 	key := candidateHealthKeyV4(p, r, c)
 	if key == "" {
 		return
@@ -319,13 +319,22 @@ func recordCandidateSuccessV4(p *Policy, r *PolicyRule, c *PolicyCandidate) {
 	v4Runtime.Lock()
 	defer v4Runtime.Unlock()
 	h := candidateHealthStateLockedV4(key)
+	h.LastSuccessAt = now
+
+	wasClosed := h.State == "" || h.State == healthClosed
+	ownsCurrentProbe := probeOwned && h.State == healthHalfOpen && h.ProbeInFlight
+	if !wasClosed && !ownsCurrentProbe {
+		// A stale normal success is telemetry only; it cannot cancel an OPEN
+		// recovery cycle or another request's HALF_OPEN probe lease.
+		return
+	}
+
 	h.State = healthClosed
 	h.ProbeInFlight = false
 	h.ConsecutiveFailures = 0
 	h.BackoffLevel = 0
 	h.LastStatus = 0
 	h.LastError = ""
-	h.LastSuccessAt = now
 	h.OpenedAt = time.Time{}
 	h.NextProbeAt = time.Time{}
 }
@@ -346,7 +355,10 @@ func releaseCandidateProbeV4(p *Policy, r *PolicyRule, c *PolicyCandidate, owned
 	}
 	h.ProbeInFlight = false
 	h.State = healthOpen
-	h.NextProbeAt = time.Now()
+	now := time.Now()
+	if h.NextProbeAt.IsZero() || h.NextProbeAt.Before(now) {
+		h.NextProbeAt = now
+	}
 }
 
 func healthSnapshotFromStateV4(p *Policy, r *PolicyRule, c *PolicyCandidate, h *candidateHealthState, now time.Time) candidateHealthSnapshot {

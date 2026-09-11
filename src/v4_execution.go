@@ -32,7 +32,7 @@ func runNonStreamPolicyV4(trace string, p *Policy, r *PolicyRule, ranked []*Poli
 		resp, ar, err := executeCandidateV4(c, source, clientModel, body, headers, query, alt, callbackID, false)
 		event.Attempts = append(event.Attempts, ar)
 		if err == nil && resp.StatusCode >= 200 && resp.StatusCode < 400 {
-			recordCandidateSuccessV4(p, r, c)
+			recordCandidateSuccessV4(p, r, c, probe)
 			event.Final = c.Name
 			event.Provider = c.Provider
 			event.AuthIndex = c.AuthIndex
@@ -216,8 +216,12 @@ func runStreamPolicyV4(trace string, p *Policy, r *PolicyRule, ranked []*PolicyC
 		max = len(ranked)
 	}
 	var lastErr error
+	var activeCandidate *PolicyCandidate
+	activeProbe := false
 	defer func() {
 		if x := recover(); x != nil {
+			// Never strand a HALF_OPEN lease if the stream worker panics.
+			releaseCandidateProbeV4(p, r, activeCandidate, activeProbe)
 			_ = closeOutputStream(outStreamID, fmt.Sprintf("panic: %v", x))
 		}
 	}()
@@ -227,6 +231,8 @@ func runStreamPolicyV4(trace string, p *Policy, r *PolicyRule, ranked []*PolicyC
 		if c == nil {
 			break
 		}
+		activeCandidate = c
+		activeProbe = probe
 		attempted[c.ID] = true
 		currentPriority = c.Priority
 		model := c.OverrideModel
@@ -380,7 +386,7 @@ func runStreamPolicyV4(trace string, p *Policy, r *PolicyRule, ranked []*PolicyC
 			}
 			if rr.Done {
 				_ = closeHostStream(sr.StreamID)
-				recordCandidateSuccessV4(p, r, c)
+				recordCandidateSuccessV4(p, r, c, probe)
 				event.Final = c.Name
 				event.Provider = c.Provider
 				event.AuthIndex = c.AuthIndex
