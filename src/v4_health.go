@@ -339,6 +339,12 @@ func recordCandidateSuccessV4(p *Policy, r *PolicyRule, c *PolicyCandidate, prob
 	h.NextProbeAt = time.Time{}
 }
 
+func clearProbeOwnershipV4(owned *bool) {
+	if owned != nil {
+		*owned = false
+	}
+}
+
 func releaseCandidateProbeV4(p *Policy, r *PolicyRule, c *PolicyCandidate, owned bool) {
 	if !owned {
 		return

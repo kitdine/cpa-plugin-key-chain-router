@@ -318,3 +318,39 @@ func TestIssue13ProbeReleasePreservesStrongerDeadline(t *testing.T) {
 		t.Fatalf("probe release shortened stronger deadline: before=%v after=%v", strong, after)
 	}
 }
+
+func TestIssue13ResolvedProbeOwnershipCannotReleaseLaterProbe(t *testing.T) {
+	resetIssue13Health(t)
+	p, r, ranked := issue13Fixture()
+	a := ranked[0]
+	key := candidateHealthKeyV4(p, r, a)
+
+	recordCandidateFailureV4(p, r, a, 503, nil, nil)
+	v4Runtime.Lock()
+	v4Runtime.health[key].NextProbeAt = time.Now().Add(-time.Millisecond)
+	v4Runtime.Unlock()
+	_, owned := nextHealthyCandidateV4(p, r, ranked, map[string]bool{}, failNext, int(^uint(0)>>1))
+	if !owned {
+		t.Fatal("expected first half-open probe ownership")
+	}
+	recordCandidateFailureV4(p, r, a, 503, nil, nil, true)
+	clearProbeOwnershipV4(&owned)
+	if owned {
+		t.Fatal("resolved probe ownership remained active")
+	}
+
+	v4Runtime.Lock()
+	v4Runtime.health[key].NextProbeAt = time.Now().Add(-time.Millisecond)
+	v4Runtime.Unlock()
+	_, second := nextHealthyCandidateV4(p, r, ranked, map[string]bool{}, failNext, int(^uint(0)>>1))
+	if !second {
+		t.Fatal("expected second half-open probe ownership")
+	}
+	releaseCandidateProbeV4(p, r, a, owned)
+	v4Runtime.RLock()
+	stillInFlight := v4Runtime.health[key].ProbeInFlight
+	v4Runtime.RUnlock()
+	if !stillInFlight {
+		t.Fatal("stale resolved ownership released a later probe lease")
+	}
+}
