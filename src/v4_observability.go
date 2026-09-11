@@ -112,7 +112,13 @@ func enrichRoutingSelectionReasonsV6(ev *RoutingEvent) {
 }
 
 func ruleForRoutingEventV6(ev *RoutingEvent) *PolicyRule {
-	if ev == nil || ev.KeyFingerprint == "" {
+	if ev == nil {
+		return nil
+	}
+	if ev.ruleSnapshot != nil {
+		return cloneRuleV4(ev.ruleSnapshot)
+	}
+	if ev.KeyFingerprint == "" {
 		return nil
 	}
 	v4Runtime.RLock()
@@ -339,6 +345,8 @@ func enqueueSQLiteV4(ev RoutingEvent) {
 	select {
 	case s.ch <- ev:
 	default:
+		err := fmt.Errorf("sqlite queue full; routing event %s dropped", ev.TraceID)
+		recordSQLiteWriteV62(err)
 		_, _ = callHost("host.log", map[string]any{"level": "warn", "message": "kcr sqlite queue full; routing event dropped", "fields": map[string]any{"trace_id": ev.TraceID}})
 	}
 }
@@ -392,19 +400,73 @@ func newSQLiteSinkV4(path string, cfg ObservabilityConfig) (*sqliteSink, error) 
 		return nil, err
 	}
 
-	// Existing v0.4/v0.5 databases do not have selection_reasons.
-	// SQLite lacks ADD COLUMN IF NOT EXISTS, so duplicate-column is intentionally ignored.
-	_, _ = db.Exec(`ALTER TABLE routing_events ADD COLUMN selection_reasons TEXT`)
-	_, _ = db.Exec(`ALTER TABLE routing_events ADD COLUMN error TEXT`)
+	// Existing v0.4/v0.5 databases may not have columns introduced later.
+	// Inspect the schema first so only an actually missing column is altered; all
+	// genuine migration failures are propagated to the caller.
+	if err = ensureRoutingEventColumnV4(db, "selection_reasons", "TEXT"); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("migrate routing_events.selection_reasons: %w", err)
+	}
+	if err = ensureRoutingEventColumnV4(db, "error", "TEXT"); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("migrate routing_events.error: %w", err)
+	}
 
 	// v0.6 deliberately stops retaining requests from API keys with no configured Policy.
 	// Purge historical rows with that old reason as well.
-	_, _ = db.Exec(`DELETE FROM routing_attempts WHERE trace_id IN (SELECT trace_id FROM routing_events WHERE reason='no_policy')`)
-	_, _ = db.Exec(`DELETE FROM routing_events WHERE reason='no_policy'`)
+	if _, err = db.Exec(`DELETE FROM routing_attempts WHERE trace_id IN (SELECT trace_id FROM routing_events WHERE reason='no_policy')`); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("purge no_policy attempts: %w", err)
+	}
+	if _, err = db.Exec(`DELETE FROM routing_events WHERE reason='no_policy'`); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("purge no_policy events: %w", err)
+	}
 
 	s := &sqliteSink{db: db, path: path, ch: make(chan RoutingEvent, 1024), stop: make(chan struct{}), done: make(chan struct{}), cfg: cfg}
 	go s.loop()
+	recordSQLiteOpenV62(path)
 	return s, nil
+}
+
+func ensureRoutingEventColumnV4(db *sql.DB, column, decl string) error {
+	if db == nil {
+		return errors.New("sqlite db is nil")
+	}
+	switch column {
+	case "selection_reasons", "error":
+	default:
+		return fmt.Errorf("unsupported routing_events column %q", column)
+	}
+	rows, err := db.Query(`PRAGMA table_info(routing_events)`)
+	if err != nil {
+		return err
+	}
+	found := false
+	for rows.Next() {
+		var cid, notNull, pk int
+		var name, typ string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		if name == column {
+			found = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if found {
+		return nil
+	}
+	_, err = db.Exec(`ALTER TABLE routing_events ADD COLUMN ` + column + ` ` + decl)
+	return err
 }
 
 func (s *sqliteSink) close() {

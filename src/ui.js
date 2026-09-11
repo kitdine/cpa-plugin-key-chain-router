@@ -331,7 +331,7 @@ function renderObs() {
         h.journal_mode ? 'Journal：' + h.journal_mode : '',
         (h.last_write_at || h.last_persisted_at) ? '最后写入：' + (h.last_write_at || h.last_persisted_at) : '最后写入：暂无'
       ].filter(Boolean);
-      health.innerHTML = '<div class="' + cls + '"><b>SQLite ' + (h.active ? '运行中' : '未运行') + '</b><div class="small" style="margin-top:5px;word-break:break-all">' + esc(bits.join(' · ')) + '</div>' +
+      health.innerHTML = '<div class="' + cls + '"><b>SQLite ' + (h.active ? (h.write_healthy === false ? '运行中（写入异常，查询回退 Memory）' : '运行中') : '未运行') + '</b><div class="small" style="margin-top:5px;word-break:break-all">' + esc(bits.join(' · ')) + '</div>' +
         (h.last_error ? '<div class="red small" style="margin-top:5px">最后错误：' + esc(h.last_error) + (h.last_error_at ? ' · ' + esc(h.last_error_at) : '') + '</div>' : '') +
         (h.probe_error ? '<div class="red small" style="margin-top:5px">健康检查：' + esc(h.probe_error) + '</div>' : '') + '</div>';
     }
@@ -486,6 +486,20 @@ function toggleEvent(traceID) {
 
 function renderEventDetail(e) {
   const eventReason = reasonLabel(e.reason);
+  const final = e.final || (e.decision === 'KCR_FALLBACK_TO_CPA' ? 'CPA Default' : '-');
+  const duration = Number.isFinite(Number(e.duration_ms)) ? e.duration_ms + ' ms' : '-';
+  const primary = [
+    '时间 ' + fmtEventTime(e.at),
+    'Model ' + (e.model || '-'),
+    'Policy ' + (e.policy_name || '-'),
+    'Rule ' + (e.rule_name || '-'),
+    'Strategy ' + (e.strategy || '-'),
+    '最终候选 ' + final,
+    'Provider ' + (e.provider || '-'),
+    '状态 ' + eventStatusText(e),
+    '耗时 ' + duration,
+    'Attempts ' + ((e.attempts || []).length)
+  ].join(' · ');
   const details = [
     e.decision ? 'Decision ' + e.decision : '',
     e.auth_index ? '最终 AuthIndex ' + e.auth_index : '',
@@ -493,6 +507,7 @@ function renderEventDetail(e) {
     e.trace_id ? 'Trace ' + e.trace_id : ''
   ].filter(Boolean).join(' · ');
   return '<div class="event-detail">' +
+    '<div class="small event-detail-meta">' + esc(primary) + '</div>' +
     (eventReason ? '<div class="event-detail-reason"><b>路由结果：</b>' + esc(eventReason) + '</div>' : '') +
     '<div class="muted small event-detail-meta">' + esc(details) + '</div>' +
     '<div class="event-detail-title">候选尝试</div>' +

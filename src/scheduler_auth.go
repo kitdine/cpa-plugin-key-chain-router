@@ -53,15 +53,52 @@ func authIDFromEntries(entries []hostAuthEntry, authIndex, provider string) stri
 	}
 
 	// AuthIndex should normally be unique. If a host returns duplicates, use
-	// provider/type only as a disambiguator instead of allowing an arbitrary pick.
+	// provider/type only as a disambiguator and fail closed unless that leaves
+	// exactly one unique AuthID.
+	matchedID := ""
 	for _, entry := range matches {
 		entryProvider := strings.TrimSpace(entry.Provider)
 		if entryProvider == "" {
 			entryProvider = strings.TrimSpace(entry.Type)
 		}
-		if provider != "" && strings.EqualFold(entryProvider, provider) {
-			return strings.TrimSpace(entry.ID)
+		if provider == "" || !strings.EqualFold(entryProvider, provider) {
+			continue
+		}
+		id := strings.TrimSpace(entry.ID)
+		if matchedID == "" {
+			matchedID = id
+			continue
+		}
+		if id != matchedID {
+			return ""
 		}
 	}
-	return ""
+	return matchedID
+}
+
+func schedulerCandidateEligible(candidates []any, authIndex, provider string) bool {
+	authIndex = strings.TrimSpace(authIndex)
+	provider = strings.TrimSpace(provider)
+	if authIndex == "" {
+		return false
+	}
+	for _, raw := range candidates {
+		m := anyMap(raw)
+		idx := stringAny(m, "AuthIndex")
+		if idx == "" {
+			idx = stringAny(m, "auth_index")
+		}
+		if strings.TrimSpace(idx) != authIndex {
+			continue
+		}
+		candidateProvider := stringAny(m, "Provider")
+		if candidateProvider == "" {
+			candidateProvider = stringAny(m, "provider")
+		}
+		if provider != "" && !strings.EqualFold(strings.TrimSpace(candidateProvider), provider) {
+			continue
+		}
+		return true
+	}
+	return false
 }
