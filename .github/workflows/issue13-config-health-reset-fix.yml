@@ -1,0 +1,80 @@
+name: Issue 13 Candidate Config Health Reset Fix
+
+on:
+  push:
+    branches:
+      - fix/issue-13-health-aware-failback
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: "!contains(github.event.head_commit.message, '[issue-13-config-reset-done]')"
+    runs-on: ubuntu-latest
+    container:
+      image: golang:1.26-bookworm
+    steps:
+      - name: Install tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git build-essential python3 nodejs ca-certificates file binutils zip
+          rm -rf /var/lib/apt/lists/*
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/issue-13-health-aware-failback
+          fetch-depth: 0
+      - name: Apply candidate config health reset fix
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          hp = Path('src/v4_health.go')
+          hs = hp.read_text()
+          marker = 'func pruneCandidateHealthLockedV4() {'
+          helper = '''func candidateHealthConfigEqualV4(a, b *PolicyCandidate) bool {\n\tif a == nil || b == nil {\n\t\treturn a == b\n\t}\n\treturn strings.TrimSpace(a.ResourceID) == strings.TrimSpace(b.ResourceID) &&\n\t\tstrings.TrimSpace(a.ResourceKind) == strings.TrimSpace(b.ResourceKind) &&\n\t\tstrings.TrimSpace(a.Provider) == strings.TrimSpace(b.Provider) &&\n\t\tstrings.TrimSpace(a.AuthIndex) == strings.TrimSpace(b.AuthIndex) &&\n\t\tstrings.TrimSpace(a.OverrideModel) == strings.TrimSpace(b.OverrideModel) &&\n\t\ta.Enabled == b.Enabled\n}\n\nfunc resetChangedCandidateHealthLockedV4(oldPolicy, newPolicy *Policy) {\n\tif oldPolicy == nil || newPolicy == nil || len(v4Runtime.health) == 0 {\n\t\treturn\n\t}\n\toldRules := make(map[string]*PolicyRule, len(oldPolicy.Rules))\n\tfor _, r := range oldPolicy.Rules {\n\t\tif r != nil {\n\t\t\toldRules[r.ID] = r\n\t\t}\n\t}\n\tfor _, newRule := range newPolicy.Rules {\n\t\tif newRule == nil {\n\t\t\tcontinue\n\t\t}\n\t\toldRule := oldRules[newRule.ID]\n\t\tif oldRule == nil {\n\t\t\tcontinue\n\t\t}\n\t\toldCandidates := make(map[string]*PolicyCandidate, len(oldRule.Candidates))\n\t\tfor _, c := range oldRule.Candidates {\n\t\t\tif c != nil {\n\t\t\t\toldCandidates[c.ID] = c\n\t\t\t}\n\t\t}\n\t\tfor _, newCandidate := range newRule.Candidates {\n\t\t\tif newCandidate == nil {\n\t\t\t\tcontinue\n\t\t\t}\n\t\t\toldCandidate := oldCandidates[newCandidate.ID]\n\t\t\tif oldCandidate == nil || candidateHealthConfigEqualV4(oldCandidate, newCandidate) {\n\t\t\t\tcontinue\n\t\t\t}\n\t\t\tdelete(v4Runtime.health, candidateHealthKeyV4(oldPolicy, oldRule, oldCandidate))\n\t\t}\n\t}\n}\n\n'''
+          if 'func resetChangedCandidateHealthLockedV4(' not in hs:
+              if marker not in hs:
+                  raise SystemExit('pruneCandidateHealthLockedV4 marker not found')
+              hs = hs.replace(marker, helper + marker, 1)
+          hp.write_text(hs)
+
+          mp = Path('src/v4_management.go')
+          ms = mp.read_text()
+          old = '''\t\tif v4Runtime.state.Policies == nil {\n\t\t\tv4Runtime.state.Policies = map[string]*Policy{}\n\t\t}\n\t\tv4Runtime.state.Policies[p.KeyFingerprint] = clonePolicyV4(&p)\n\t\tpruneCandidateHealthLockedV4()\n'''
+          new = '''\t\tif v4Runtime.state.Policies == nil {\n\t\t\tv4Runtime.state.Policies = map[string]*Policy{}\n\t\t}\n\t\treplacement := clonePolicyV4(&p)\n\t\tresetChangedCandidateHealthLockedV4(v4Runtime.state.Policies[p.KeyFingerprint], replacement)\n\t\tv4Runtime.state.Policies[p.KeyFingerprint] = replacement\n\t\tpruneCandidateHealthLockedV4()\n'''
+          if ms.count(old) != 1:
+              raise SystemExit(f'expected save_policy replacement block once, got {ms.count(old)}')
+          mp.write_text(ms.replace(old, new, 1))
+
+          tp = Path('src/issue13_health_test.go')
+          ts = tp.read_text()
+          if 'TestIssue13MaterialCandidateConfigChangeResetsHealth' not in ts:
+              ts += '''\n\nfunc TestIssue13MaterialCandidateConfigChangeResetsHealth(t *testing.T) {\n\tresetIssue13Health(t)\n\tp, r, ranked := issue13Fixture()\n\ta := ranked[0]\n\trecordCandidateFailureV4(p, r, a, 503, nil, nil)\n\tkey := candidateHealthKeyV4(p, r, a)\n\n\t// Selection-only tuning must preserve endpoint health.\n\tweightOnly := clonePolicyV4(p)\n\tweightOnly.Rules[0].Candidates[0].Weight = 9\n\tv4Runtime.Lock()\n\tresetChangedCandidateHealthLockedV4(p, weightOnly)\n\t_, stillPresent := v4Runtime.health[key]\n\tv4Runtime.Unlock()\n\tif !stillPresent {\n\t\tt.Fatal("weight-only change unexpectedly reset candidate health")\n\t}\n\n\t// A material execution change fixes/replaces the upstream target and must\n\t// immediately discard the stale OPEN state rather than waiting for cooldown.\n\tchanged := clonePolicyV4(p)\n\tchanged.Rules[0].Candidates[0].OverrideModel = "fixed-model"\n\tv4Runtime.Lock()\n\tresetChangedCandidateHealthLockedV4(p, changed)\n\t_, stillPresent = v4Runtime.health[key]\n\tv4Runtime.Unlock()\n\tif stillPresent {\n\t\tt.Fatal("material candidate config change retained stale health state")\n\t}\n}\n'''
+          tp.write_text(ts)
+          PY
+      - name: Format and test
+        run: |
+          gofmt -w src/v4_health.go src/v4_management.go src/issue13_health_test.go
+          cd src
+          go test ./...
+          go vet ./...
+          node --check ui.js
+      - name: Build and ABI smoke
+        run: |
+          bash ./scripts/build.sh
+          VERSION="$(tr -d '[:space:]' < VERSION)"
+          cd src
+          python3 abi_smoke.py "../dist/key-chain-router-v${VERSION}.so"
+      - name: Commit fix and remove helper
+        run: |
+          ROOT="$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "$ROOT"
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          rm -f "$ROOT/.github/workflows/issue13-config-health-reset-fix.yml"
+          git -C "$ROOT" add -A
+          git -C "$ROOT" diff --cached --check
+          git -C "$ROOT" commit -m 'fix: reset stale health after candidate config changes (#13) [issue-13-config-reset-done]'
+          git -C "$ROOT" pull --rebase origin fix/issue-13-health-aware-failback
+          git -C "$ROOT" push origin HEAD:fix/issue-13-health-aware-failback
