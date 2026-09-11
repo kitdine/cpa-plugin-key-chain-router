@@ -124,41 +124,42 @@ func candidateWouldBeSelectableV4(p *Policy, r *PolicyRule, c *PolicyCandidate, 
 	return state == healthHalfOpen
 }
 
-func acquireCandidateHealthWithReasonV4(p *Policy, r *PolicyRule, c *PolicyCandidate, now time.Time) (bool, bool, string) {
+func acquireCandidateHealthWithReasonV4(p *Policy, r *PolicyRule, c *PolicyCandidate, now time.Time) (bool, bool, uint64, string) {
 	key := candidateHealthKeyV4(p, r, c)
-	if key == "" {
-		return true, false, ""
-	}
 	v4Runtime.Lock()
 	defer v4Runtime.Unlock()
+	generation := v4Runtime.generation
+	if key == "" {
+		return true, false, generation, ""
+	}
 	if !candidateHealthConfigCurrentLockedV4(p, r, c) {
-		return true, false, ""
+		return true, false, generation, ""
 	}
 	h := candidateHealthStateLockedV4(key)
 	if h.State == healthClosed {
-		return true, false, ""
+		return true, false, generation, ""
 	}
 	name := strings.TrimSpace(c.Name)
 	if name == "" {
 		name = c.ID
 	}
 	if h.ProbeInFlight {
-		return false, false, fmt.Sprintf("候选 %s 健康状态=%s，已有恢复探测正在执行，跳过", name, h.State)
+		return false, false, generation, fmt.Sprintf("候选 %s 健康状态=%s，已有恢复探测正在执行，跳过", name, h.State)
 	}
 	if h.State == healthOpen && !h.NextProbeAt.IsZero() && now.Before(h.NextProbeAt) {
 		retryMs := h.NextProbeAt.Sub(now).Milliseconds()
 		if retryMs < 0 {
 			retryMs = 0
 		}
-		return false, false, fmt.Sprintf("候选 %s 健康状态=OPEN，约 %dms 后允许恢复探测，跳过", name, retryMs)
+		return false, false, generation, fmt.Sprintf("候选 %s 健康状态=OPEN，约 %dms 后允许恢复探测，跳过", name, retryMs)
 	}
 	h.State = healthHalfOpen
 	h.ProbeInFlight = true
-	return true, true, ""
+	return true, true, generation, ""
 }
 
 func acquireCandidateHealthV4(p *Policy, r *PolicyRule, c *PolicyCandidate, now time.Time) (bool, bool) {
-	ok, probe, _ := acquireCandidateHealthWithReasonV4(p, r, c, now)
+	ok, probe, _, _ := acquireCandidateHealthWithReasonV4(p, r, c, now)
 	return ok, probe
 }
 
@@ -191,9 +192,11 @@ func chooseHealthyCandidateV4(p *Policy, r *PolicyRule, ranked []*PolicyCandidat
 				continue
 			}
 			if acquire {
-				ok, probe, skipReason := acquireCandidateHealthWithReasonV4(p, r, c, now)
+				ok, probe, generation, skipReason := acquireCandidateHealthWithReasonV4(p, r, c, now)
 				if ok {
-					return c, probe
+					acquired := *c
+					acquired.runtimeGeneration = generation
+					return &acquired, probe
 				}
 				if healthSkips != nil && skipReason != "" {
 					*healthSkips = append(*healthSkips, skipReason)
@@ -289,8 +292,6 @@ func recordCandidateFailureV4(p *Policy, r *PolicyRule, c *PolicyCandidate, stat
 	}
 	cooldown, qualifies := candidateFailureCooldownV4(status, err, headers, level, now)
 	if !qualifies {
-		// A half-open probe that reaches the upstream and receives a request-specific
-		// non-health status proves transport reachability; do not strand the lease.
 		if isProbe && (h.ProbeInFlight || h.State == healthHalfOpen) {
 			h.State = healthClosed
 			h.ProbeInFlight = false
@@ -306,9 +307,6 @@ func recordCandidateFailureV4(p *Policy, r *PolicyRule, c *PolicyCandidate, stat
 	wasClosed := h.State == "" || h.State == healthClosed
 	switch {
 	case isProbe:
-		// Only a failed half-open recovery probe advances exponential backoff.
-		// Preserve a stronger deadline that may have been extended by a stale
-		// 401/403/429 response while this probe was in flight.
 		h.BackoffLevel = level
 		h.State = healthOpen
 		h.ProbeInFlight = false
@@ -317,17 +315,11 @@ func recordCandidateFailureV4(p *Policy, r *PolicyRule, c *PolicyCandidate, stat
 			h.NextProbeAt = proposedDeadline
 		}
 	case wasClosed:
-		// First failure opens the circuit at the base cooldown. Concurrent attempts
-		// that were already in flight must not escalate the backoff level.
 		h.State = healthOpen
 		h.ProbeInFlight = false
 		h.OpenedAt = now
 		h.NextProbeAt = proposedDeadline
 	default:
-		// This is a stale normal attempt that started before another request opened
-		// the circuit (or while a recovery probe is now running). Do not alter the
-		// state, probe lease, or backoff. Only stronger auth/rate-limit deadlines may
-		// extend an existing open deadline; never shorten it.
 		if status == 401 || status == 403 || status == 429 {
 			if h.NextProbeAt.IsZero() || proposedDeadline.After(h.NextProbeAt) {
 				h.NextProbeAt = proposedDeadline
@@ -361,8 +353,6 @@ func recordCandidateSuccessV4(p *Policy, r *PolicyRule, c *PolicyCandidate, prob
 	wasClosed := h.State == "" || h.State == healthClosed
 	ownsCurrentProbe := probeOwned && h.State == healthHalfOpen && h.ProbeInFlight
 	if !wasClosed && !ownsCurrentProbe {
-		// A stale normal success is telemetry only; it cannot cancel an OPEN
-		// recovery cycle or another request's HALF_OPEN probe lease.
 		return
 	}
 
@@ -512,6 +502,9 @@ func candidateHealthConfigCurrentLockedV4(p *Policy, r *PolicyRule, c *PolicyCan
 	if p == nil || r == nil || c == nil {
 		return false
 	}
+	if c.runtimeGeneration != 0 && c.runtimeGeneration != v4Runtime.generation {
+		return false
+	}
 	activePolicy := v4Runtime.state.Policies[strings.TrimSpace(p.KeyFingerprint)]
 	if activePolicy == nil {
 		return false
@@ -587,7 +580,6 @@ func pruneCandidateHealthLockedV4() {
 				if key := candidateHealthKeyV4(p, r, c); key != "" {
 					valid[key] = struct{}{}
 				}
-			}
 		}
 	}
 	for key := range v4Runtime.health {
