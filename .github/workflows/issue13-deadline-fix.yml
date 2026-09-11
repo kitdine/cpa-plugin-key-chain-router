@@ -30,8 +30,8 @@ jobs:
           from pathlib import Path
           p = Path('src/v4_health.go')
           s = p.read_text()
-          old = '''\tcase isProbe:\n\t\t// Only a failed half-open recovery probe advances exponential backoff.\n\t\th.BackoffLevel = level\n\t\th.State = healthOpen\n\t\th.ProbeInFlight = false\n\t\th.OpenedAt = now\n\t\th.NextProbeAt = proposedDeadline\n'''
-          new = '''\tcase isProbe:\n\t\t// Only a failed half-open recovery probe advances exponential backoff.\n\t\t// Preserve a stronger deadline that may have been extended by a stale\n\t\t// 401/403/429 response while this probe was in flight.\n\t\th.BackoffLevel = level\n\t\th.State = healthOpen\n\t\th.ProbeInFlight = false\n\t\th.OpenedAt = now\n\t\tif h.NextProbeAt.IsZero() || proposedDeadline.After(h.NextProbeAt) {\n\t\t\th.NextProbeAt = proposedDeadline\n\t\t}\n'''
+          old = "\tcase isProbe:\n\t\t// Only a failed half-open recovery probe advances exponential backoff.\n\t\th.BackoffLevel = level\n\t\th.State = healthOpen\n\t\th.ProbeInFlight = false\n\t\th.OpenedAt = now\n\t\th.NextProbeAt = proposedDeadline\n"
+          new = "\tcase isProbe:\n\t\t// Only a failed half-open recovery probe advances exponential backoff.\n\t\t// Preserve a stronger deadline that may have been extended by a stale\n\t\t// 401/403/429 response while this probe was in flight.\n\t\th.BackoffLevel = level\n\t\th.State = healthOpen\n\t\th.ProbeInFlight = false\n\t\th.OpenedAt = now\n\t\tif h.NextProbeAt.IsZero() || proposedDeadline.After(h.NextProbeAt) {\n\t\t\th.NextProbeAt = proposedDeadline\n\t\t}\n"
           if s.count(old) != 1:
               raise SystemExit(f'expected one probe block, got {s.count(old)}')
           p.write_text(s.replace(old, new, 1))
@@ -40,44 +40,36 @@ jobs:
           ts = t.read_text()
           marker = 'TestIssue13ProbeFailurePreservesLongerExistingDeadline'
           if marker not in ts:
-              ts += r'''
-
-func TestIssue13ProbeFailurePreservesLongerExistingDeadline(t *testing.T) {
-	resetIssue13Health(t)
-	p, r, ranked := issue13Fixture()
-	a := ranked[0]
-
-	// Open A, then allow a half-open probe.
-	recordCandidateFailureV4(p, r, a, 503, nil, nil)
-	key := candidateHealthKeyV4(p, r, a)
-	v4Runtime.Lock()
-	v4Runtime.health[key].NextProbeAt = time.Now().Add(-time.Millisecond)
-	v4Runtime.Unlock()
-	if got, probe := nextHealthyCandidateV4(p, r, ranked, map[string]bool{}, failNext, int(^uint(0)>>1)); got == nil || got.ID != "a" || !probe {
-		t.Fatalf("expected half-open A probe, got=%v probe=%v", got, probe)
-	}
-
-	// A stale normal request receives a longer Retry-After while the probe is in flight.
-	recordCandidateFailureV4(p, r, a, 429, nil, http.Header{"Retry-After": []string{"240"}}, false)
-	v4Runtime.RLock()
-	longDeadline := v4Runtime.health[key].NextProbeAt
-	v4Runtime.RUnlock()
-	if time.Until(longDeadline) < 230*time.Second {
-		t.Fatalf("stale 429 did not establish long deadline: %v", longDeadline)
-	}
-
-	// The probe then fails with a transient 503. Its shorter exponential backoff
-	// must not overwrite the longer Retry-After deadline.
-	recordCandidateFailureV4(p, r, a, 503, nil, nil, true)
-	v4Runtime.RLock()
-	gotDeadline := v4Runtime.health[key].NextProbeAt
-	v4Runtime.RUnlock()
-	if gotDeadline.Before(longDeadline) {
-		t.Fatalf("probe failure shortened deadline: got=%v want>=%v", gotDeadline, longDeadline)
-	}
-}
-'''
-              t.write_text(ts)
+              test = (
+                  "\n\nfunc TestIssue13ProbeFailurePreservesLongerExistingDeadline(t *testing.T) {\n"
+                  "\tresetIssue13Health(t)\n"
+                  "\tp, r, ranked := issue13Fixture()\n"
+                  "\ta := ranked[0]\n\n"
+                  "\trecordCandidateFailureV4(p, r, a, 503, nil, nil)\n"
+                  "\tkey := candidateHealthKeyV4(p, r, a)\n"
+                  "\tv4Runtime.Lock()\n"
+                  "\tv4Runtime.health[key].NextProbeAt = time.Now().Add(-time.Millisecond)\n"
+                  "\tv4Runtime.Unlock()\n"
+                  "\tif got, probe := nextHealthyCandidateV4(p, r, ranked, map[string]bool{}, failNext, int(^uint(0)>>1)); got == nil || got.ID != \"a\" || !probe {\n"
+                  "\t\tt.Fatalf(\"expected half-open A probe, got=%v probe=%v\", got, probe)\n"
+                  "\t}\n\n"
+                  "\trecordCandidateFailureV4(p, r, a, 429, nil, http.Header{\"Retry-After\": []string{\"240\"}}, false)\n"
+                  "\tv4Runtime.RLock()\n"
+                  "\tlongDeadline := v4Runtime.health[key].NextProbeAt\n"
+                  "\tv4Runtime.RUnlock()\n"
+                  "\tif time.Until(longDeadline) < 230*time.Second {\n"
+                  "\t\tt.Fatalf(\"stale 429 did not establish long deadline: %v\", longDeadline)\n"
+                  "\t}\n\n"
+                  "\trecordCandidateFailureV4(p, r, a, 503, nil, nil, true)\n"
+                  "\tv4Runtime.RLock()\n"
+                  "\tgotDeadline := v4Runtime.health[key].NextProbeAt\n"
+                  "\tv4Runtime.RUnlock()\n"
+                  "\tif gotDeadline.Before(longDeadline) {\n"
+                  "\t\tt.Fatalf(\"probe failure shortened deadline: got=%v want>=%v\", gotDeadline, longDeadline)\n"
+                  "\t}\n"
+                  "}\n"
+              )
+              t.write_text(ts + test)
           PY
       - name: Format and test
         run: |
