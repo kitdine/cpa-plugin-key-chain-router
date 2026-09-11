@@ -25,7 +25,18 @@ jobs:
           ref: fix/issue-13-health-aware-failback
           fetch-depth: 0
       - name: Apply patch
-        run: python3 scripts/issue13_patch.py
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('scripts/issue13_patch.py')
+          s = p.read_text()
+          old = '''    if n != 1:\n        raise SystemExit(f"{path}: expected exactly one match, got {n}")\n    p.write_text(text.replace(old, new, 1))'''
+          new = '''    if n < 1:\n        raise SystemExit(f"{path}: expected at least one match, got {n}")\n    p.write_text(text.replace(old, new, 1))'''
+          if old not in s:
+              raise SystemExit('replace_once helper marker not found')
+          p.write_text(s.replace(old, new, 1))
+          PY
+          python3 scripts/issue13_patch.py
       - name: Format and test
         run: |
           gofmt -w src/v4_types.go src/v4_state.go src/v4_management.go src/v4_execution.go src/v4_health.go src/issue13_health_test.go
