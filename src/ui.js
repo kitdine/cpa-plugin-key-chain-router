@@ -292,11 +292,17 @@ async function runDiag() {
     esc(d.strategy) + '</div><table style="width:100%;margin-top:12px;border-collapse:collapse"><tr>' +
     '<th align=left>#</th><th align=left>候选</th><th align=left>Provider</th>' +
     (f.priority ? '<th align=left>Priority</th>' : '') + (f.weight ? '<th align=left>Weight</th>' : '') +
-    '<th align=left>AuthIndex</th></tr>';
+    '<th align=left>AuthIndex</th><th align=left>健康</th><th align=left>当前路由</th></tr>';
   for (const c of d.ranked_candidates || []) {
+    const health = c.health || {};
+    const state = String(health.state || 'closed').toUpperCase();
+    let healthText = state;
+    if (health.probe_in_flight) healthText += ' · probe 进行中';
+    else if (Number(health.retry_in_ms || 0) > 0) healthText += ' · ' + Number(health.retry_in_ms) + 'ms 后探测';
+    const routeText = c.effective ? '✓ 当前首选' : (c.selectable ? '可选' : '跳过');
     h += '<tr><td>' + c.order + '</td><td>' + esc(c.name) + '</td><td>' + esc(c.provider) + '</td>' +
       (f.priority ? '<td>' + c.priority + '</td>' : '') + (f.weight ? '<td>' + c.weight + '</td>' : '') +
-      '<td class="mono">' + esc(c.auth_index) + '</td></tr>';
+      '<td class="mono">' + esc(c.auth_index) + '</td><td>' + esc(healthText) + '</td><td>' + esc(routeText) + '</td></tr>';
   }
   h += '</table><h3>真实验证</h3><div class="diag">' + esc(d.curl || '') +
     '</div><div class="muted">执行后到“路由记录”查看本次候选选择原因和 Failover 链。</div>';

@@ -102,13 +102,26 @@ func enrichRoutingSelectionReasonsV6(ev *RoutingEvent) {
 	rule := ruleForRoutingEventV6(ev)
 	reasons := make([]string, len(ev.Attempts))
 	for i := range ev.Attempts {
+		base := ""
 		if i == 0 {
-			reasons[i] = initialSelectionReasonV6(rule, ev.Attempts[i])
-			continue
+			base = initialSelectionReasonV6(rule, ev.Attempts[i])
+		} else {
+			base = failoverSelectionReasonV6(ev, rule, i)
 		}
-		reasons[i] = failoverSelectionReasonV6(ev, rule, i)
+		if i < len(ev.healthSkips) && len(ev.healthSkips[i]) > 0 {
+			base = healthAwareSelectionReasonV6(ev.healthSkips[i], ev.Attempts[i])
+		}
+		reasons[i] = base
 	}
 	ev.SelectionReasons = reasons
+}
+
+func healthAwareSelectionReasonV6(skips []string, a attemptResult) string {
+	name := strings.TrimSpace(a.Candidate)
+	if name == "" {
+		name = "当前候选"
+	}
+	return "策略排序后，" + strings.Join(skips, "；") + "；健康过滤后实际执行候选 " + name
 }
 
 func ruleForRoutingEventV6(ev *RoutingEvent) *PolicyRule {

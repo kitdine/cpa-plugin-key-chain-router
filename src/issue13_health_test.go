@@ -1,0 +1,480 @@
+package main
+
+import (
+	"errors"
+	"net/http"
+	"strings"
+	"testing"
+	"time"
+)
+
+func issue13Fixture() (*Policy, *PolicyRule, []*PolicyCandidate) {
+	a := &PolicyCandidate{ID: "a", Name: "A", Provider: "codex", AuthIndex: "idx-a", Enabled: true, Priority: 100, Weight: 1}
+	b := &PolicyCandidate{ID: "b", Name: "B", Provider: "codex", AuthIndex: "idx-b", Enabled: true, Priority: 90, Weight: 1}
+	r := &PolicyRule{ID: "r1", Name: "rule", Strategy: strategyOrdered, Candidates: []*PolicyCandidate{a, b}, Failover: defaultFailover()}
+	p := &Policy{Name: "policy", KeyFingerprint: "fp", Enabled: true, Rules: []*PolicyRule{r}}
+	v4Runtime.Lock()
+	if v4Runtime.state.Policies == nil {
+		v4Runtime.state.Policies = map[string]*Policy{}
+	}
+	v4Runtime.state.Policies[p.KeyFingerprint] = clonePolicyV4(p)
+	v4Runtime.Unlock()
+	return p, r, []*PolicyCandidate{a, b}
+}
+
+func resetIssue13Health(t *testing.T) {
+	t.Helper()
+	v4Runtime.Lock()
+	old := v4Runtime.health
+	oldState := cloneV4State(v4Runtime.state)
+	v4Runtime.health = map[string]*candidateHealthState{}
+	v4Runtime.Unlock()
+	t.Cleanup(func() {
+		v4Runtime.Lock()
+		v4Runtime.health = old
+		v4Runtime.state = oldState
+		v4Runtime.Unlock()
+	})
+}
+
+func TestIssue13FailureSkipsCandidateUntilSingleHalfOpenProbe(t *testing.T) {
+	resetIssue13Health(t)
+	p, r, ranked := issue13Fixture()
+	a := ranked[0]
+
+	recordCandidateFailureV4(p, r, a, 503, nil, nil)
+	attempted := map[string]bool{}
+	got, probe := nextHealthyCandidateV4(p, r, ranked, attempted, failNext, int(^uint(0)>>1))
+	if got == nil || got.ID != "b" || probe {
+		t.Fatalf("during cooldown got=(%v, probe=%v), want B non-probe", got, probe)
+	}
+
+	key := candidateHealthKeyV4(p, r, a)
+	v4Runtime.Lock()
+	v4Runtime.health[key].NextProbeAt = time.Now().Add(-time.Millisecond)
+	v4Runtime.Unlock()
+
+	got, probe = nextHealthyCandidateV4(p, r, ranked, map[string]bool{}, failNext, int(^uint(0)>>1))
+	if got == nil || got.ID != "a" || !probe {
+		t.Fatalf("after cooldown got=(%v, probe=%v), want A half-open probe", got, probe)
+	}
+
+	got, probe = nextHealthyCandidateV4(p, r, ranked, map[string]bool{}, failNext, int(^uint(0)>>1))
+	if got == nil || got.ID != "b" || probe {
+		t.Fatalf("concurrent probe got=(%v, probe=%v), want B while A probe is in flight", got, probe)
+	}
+}
+
+func TestIssue13ProbeSuccessFailsBackToPreferredCandidate(t *testing.T) {
+	resetIssue13Health(t)
+	p, r, ranked := issue13Fixture()
+	a := ranked[0]
+	recordCandidateFailureV4(p, r, a, 503, nil, nil)
+	key := candidateHealthKeyV4(p, r, a)
+	v4Runtime.Lock()
+	v4Runtime.health[key].NextProbeAt = time.Now().Add(-time.Millisecond)
+	v4Runtime.Unlock()
+	got, probe := nextHealthyCandidateV4(p, r, ranked, map[string]bool{}, failNext, int(^uint(0)>>1))
+	if got == nil || got.ID != "a" || !probe {
+		t.Fatalf("expected A probe, got=%v probe=%v", got, probe)
+	}
+
+	recordCandidateSuccessV4(p, r, a, true)
+	got, probe = nextHealthyCandidateV4(p, r, ranked, map[string]bool{}, failNext, int(^uint(0)>>1))
+	if got == nil || got.ID != "a" || probe {
+		t.Fatalf("after successful probe got=(%v, probe=%v), want normal A", got, probe)
+	}
+	view := candidateHealthViewV4(p, r, a)
+	if view.State != healthClosed || view.BackoffLevel != 0 || view.ConsecutiveFailures != 0 {
+		t.Fatalf("health after recovery = %#v", view)
+	}
+}
+
+func TestIssue13ProbeFailureUsesExponentialBackoff(t *testing.T) {
+	resetIssue13Health(t)
+	p, r, ranked := issue13Fixture()
+	a := ranked[0]
+	recordCandidateFailureV4(p, r, a, 503, nil, nil)
+	key := candidateHealthKeyV4(p, r, a)
+	v4Runtime.RLock()
+	first := v4Runtime.health[key].NextProbeAt.Sub(v4Runtime.health[key].LastFailureAt)
+	v4Runtime.RUnlock()
+	if first != 30*time.Second {
+		t.Fatalf("first cooldown=%v, want 30s", first)
+	}
+
+	v4Runtime.Lock()
+	v4Runtime.health[key].NextProbeAt = time.Now().Add(-time.Millisecond)
+	v4Runtime.Unlock()
+	got, probe := nextHealthyCandidateV4(p, r, ranked, map[string]bool{}, failNext, int(^uint(0)>>1))
+	if got == nil || got.ID != "a" || !probe {
+		t.Fatalf("expected half-open A probe, got=%v probe=%v", got, probe)
+	}
+	recordCandidateFailureV4(p, r, a, 503, nil, nil, probe)
+	v4Runtime.RLock()
+	second := v4Runtime.health[key].NextProbeAt.Sub(v4Runtime.health[key].LastFailureAt)
+	v4Runtime.RUnlock()
+	if second != 60*time.Second {
+		t.Fatalf("second cooldown=%v, want 60s", second)
+	}
+}
+
+func TestIssue13RateLimitHonorsRetryAfter(t *testing.T) {
+	resetIssue13Health(t)
+	p, r, ranked := issue13Fixture()
+	a := ranked[0]
+	h := http.Header{"Retry-After": []string{"120"}}
+	recordCandidateFailureV4(p, r, a, 429, nil, h)
+	key := candidateHealthKeyV4(p, r, a)
+	v4Runtime.RLock()
+	cooldown := v4Runtime.health[key].NextProbeAt.Sub(v4Runtime.health[key].LastFailureAt)
+	v4Runtime.RUnlock()
+	if cooldown < 120*time.Second {
+		t.Fatalf("429 cooldown=%v, want >=120s", cooldown)
+	}
+}
+
+func TestIssue13NonHealthFailureDoesNotOpenClosedCandidate(t *testing.T) {
+	resetIssue13Health(t)
+	p, r, ranked := issue13Fixture()
+	a := ranked[0]
+	recordCandidateFailureV4(p, r, a, 400, errors.New("bad request"), nil)
+	view := candidateHealthViewV4(p, r, a)
+	if view.State != healthClosed {
+		t.Fatalf("400 must not open circuit: %#v", view)
+	}
+}
+
+func TestIssue13ConcurrentClosedFailuresDoNotEscalateBackoff(t *testing.T) {
+	resetIssue13Health(t)
+	p, r, ranked := issue13Fixture()
+	a := ranked[0]
+	recordCandidateFailureV4(p, r, a, 503, nil, nil)
+	key := candidateHealthKeyV4(p, r, a)
+	v4Runtime.RLock()
+	deadline := v4Runtime.health[key].NextProbeAt
+	level := v4Runtime.health[key].BackoffLevel
+	v4Runtime.RUnlock()
+	if level != 0 {
+		t.Fatalf("initial normal failure backoff=%d, want 0", level)
+	}
+	for i := 0; i < 8; i++ {
+		recordCandidateFailureV4(p, r, a, 503, nil, nil)
+	}
+	v4Runtime.RLock()
+	after := *v4Runtime.health[key]
+	v4Runtime.RUnlock()
+	if after.BackoffLevel != 0 {
+		t.Fatalf("concurrent normal failures escalated backoff=%d, want 0", after.BackoffLevel)
+	}
+	if !after.NextProbeAt.Equal(deadline) {
+		t.Fatalf("concurrent normal failures moved deadline: before=%v after=%v", deadline, after.NextProbeAt)
+	}
+}
+
+func TestIssue13LateFailureNeverShortensRetryAfterDeadline(t *testing.T) {
+	resetIssue13Health(t)
+	p, r, ranked := issue13Fixture()
+	a := ranked[0]
+	recordCandidateFailureV4(p, r, a, 429, nil, http.Header{"Retry-After": []string{"240"}})
+	key := candidateHealthKeyV4(p, r, a)
+	v4Runtime.RLock()
+	longDeadline := v4Runtime.health[key].NextProbeAt
+	v4Runtime.RUnlock()
+	recordCandidateFailureV4(p, r, a, 503, nil, nil)
+	v4Runtime.RLock()
+	after := v4Runtime.health[key].NextProbeAt
+	v4Runtime.RUnlock()
+	if !after.Equal(longDeadline) {
+		t.Fatalf("late transient failure changed longer Retry-After deadline: before=%v after=%v", longDeadline, after)
+	}
+}
+
+func TestIssue13ProbeFailurePreservesLongerExistingDeadline(t *testing.T) {
+	resetIssue13Health(t)
+	p, r, ranked := issue13Fixture()
+	a := ranked[0]
+
+	recordCandidateFailureV4(p, r, a, 503, nil, nil)
+	key := candidateHealthKeyV4(p, r, a)
+	v4Runtime.Lock()
+	v4Runtime.health[key].NextProbeAt = time.Now().Add(-time.Millisecond)
+	v4Runtime.Unlock()
+	if got, probe := nextHealthyCandidateV4(p, r, ranked, map[string]bool{}, failNext, int(^uint(0)>>1)); got == nil || got.ID != "a" || !probe {
+		t.Fatalf("expected half-open A probe, got=%v probe=%v", got, probe)
+	}
+
+	recordCandidateFailureV4(p, r, a, 429, nil, http.Header{"Retry-After": []string{"240"}}, false)
+	v4Runtime.RLock()
+	longDeadline := v4Runtime.health[key].NextProbeAt
+	v4Runtime.RUnlock()
+	if time.Until(longDeadline) < 230*time.Second {
+		t.Fatalf("stale 429 did not establish long deadline: %v", longDeadline)
+	}
+
+	recordCandidateFailureV4(p, r, a, 503, nil, nil, true)
+	v4Runtime.RLock()
+	gotDeadline := v4Runtime.health[key].NextProbeAt
+	v4Runtime.RUnlock()
+	if gotDeadline.Before(longDeadline) {
+		t.Fatalf("probe failure shortened deadline: got=%v want>=%v", gotDeadline, longDeadline)
+	}
+}
+
+func TestIssue13ReleaseProbeRequiresOwnership(t *testing.T) {
+	resetIssue13Health(t)
+	p, r, ranked := issue13Fixture()
+	a := ranked[0]
+	recordCandidateFailureV4(p, r, a, 503, nil, nil)
+	key := candidateHealthKeyV4(p, r, a)
+	v4Runtime.Lock()
+	v4Runtime.health[key].NextProbeAt = time.Now().Add(-time.Millisecond)
+	v4Runtime.Unlock()
+	if got, probe := nextHealthyCandidateV4(p, r, ranked, map[string]bool{}, failNext, int(^uint(0)>>1)); got == nil || got.ID != "a" || !probe {
+		t.Fatalf("expected A probe, got=%v probe=%v", got, probe)
+	}
+	releaseCandidateProbeV4(p, r, a, false)
+	v4Runtime.RLock()
+	stillOwned := v4Runtime.health[key].ProbeInFlight
+	v4Runtime.RUnlock()
+	if !stillOwned {
+		t.Fatal("non-owner released another attempt probe lease")
+	}
+	releaseCandidateProbeV4(p, r, a, true)
+	v4Runtime.RLock()
+	released := !v4Runtime.health[key].ProbeInFlight
+	v4Runtime.RUnlock()
+	if !released {
+		t.Fatal("owner failed to release probe lease")
+	}
+}
+
+func TestIssue13NextPriorityAcquisitionNeverReturnsCurrentPriority(t *testing.T) {
+	resetIssue13Health(t)
+	p, r, ranked := issue13Fixture()
+	same := &PolicyCandidate{ID: "same", Name: "Same", Provider: "codex", AuthIndex: "idx-same", Enabled: true, Priority: 100, Weight: 1}
+	r.Candidates = []*PolicyCandidate{ranked[0], same, ranked[1]}
+	ranked = []*PolicyCandidate{ranked[0], same, ranked[1]}
+	attempted := map[string]bool{"a": true}
+	recordCandidateFailureV4(p, r, ranked[2], 503, nil, nil)
+	got, _ := nextHealthyCandidateV4(p, r, ranked, attempted, failNextPriority, 100)
+	if got != nil {
+		t.Fatalf("next-priority returned %s at priority %d; want nil while lower priority is unhealthy", got.ID, got.Priority)
+	}
+}
+
+func TestIssue13StaleSuccessCannotCancelRecoveryCycle(t *testing.T) {
+	resetIssue13Health(t)
+	p, r, ranked := issue13Fixture()
+	a := ranked[0]
+	key := candidateHealthKeyV4(p, r, a)
+
+	recordCandidateFailureV4(p, r, a, 503, nil, nil)
+	recordCandidateSuccessV4(p, r, a, false)
+	v4Runtime.RLock()
+	openState := *v4Runtime.health[key]
+	v4Runtime.RUnlock()
+	if openState.State != healthOpen || openState.ProbeInFlight {
+		t.Fatalf("stale normal success cancelled OPEN state: %#v", openState)
+	}
+
+	v4Runtime.Lock()
+	v4Runtime.health[key].NextProbeAt = time.Now().Add(-time.Millisecond)
+	v4Runtime.Unlock()
+	got, probe := nextHealthyCandidateV4(p, r, ranked, map[string]bool{}, failNext, int(^uint(0)>>1))
+	if got == nil || got.ID != "a" || !probe {
+		t.Fatalf("expected A half-open probe, got=%v probe=%v", got, probe)
+	}
+
+	recordCandidateSuccessV4(p, r, a, false)
+	v4Runtime.RLock()
+	half := *v4Runtime.health[key]
+	v4Runtime.RUnlock()
+	if half.State != healthHalfOpen || !half.ProbeInFlight {
+		t.Fatalf("stale success cancelled HALF_OPEN probe: %#v", half)
+	}
+
+	recordCandidateSuccessV4(p, r, a, true)
+	v4Runtime.RLock()
+	closed := *v4Runtime.health[key]
+	v4Runtime.RUnlock()
+	if closed.State != healthClosed || closed.ProbeInFlight || closed.BackoffLevel != 0 {
+		t.Fatalf("probe owner did not close circuit: %#v", closed)
+	}
+}
+
+func TestIssue13ProbeReleasePreservesStrongerDeadline(t *testing.T) {
+	resetIssue13Health(t)
+	p, r, ranked := issue13Fixture()
+	a := ranked[0]
+	key := candidateHealthKeyV4(p, r, a)
+	recordCandidateFailureV4(p, r, a, 503, nil, nil)
+	v4Runtime.Lock()
+	v4Runtime.health[key].NextProbeAt = time.Now().Add(-time.Millisecond)
+	v4Runtime.Unlock()
+	if got, probe := nextHealthyCandidateV4(p, r, ranked, map[string]bool{}, failNext, int(^uint(0)>>1)); got == nil || !probe {
+		t.Fatalf("expected probe, got=%v probe=%v", got, probe)
+	}
+	recordCandidateFailureV4(p, r, a, 429, nil, http.Header{"Retry-After": []string{"240"}}, false)
+	v4Runtime.RLock()
+	strong := v4Runtime.health[key].NextProbeAt
+	v4Runtime.RUnlock()
+	releaseCandidateProbeV4(p, r, a, true)
+	v4Runtime.RLock()
+	after := v4Runtime.health[key].NextProbeAt
+	v4Runtime.RUnlock()
+	if after.Before(strong) {
+		t.Fatalf("probe release shortened stronger deadline: before=%v after=%v", strong, after)
+	}
+}
+
+func TestIssue13ResolvedProbeOwnershipCannotReleaseLaterProbe(t *testing.T) {
+	resetIssue13Health(t)
+	p, r, ranked := issue13Fixture()
+	a := ranked[0]
+	key := candidateHealthKeyV4(p, r, a)
+
+	recordCandidateFailureV4(p, r, a, 503, nil, nil)
+	v4Runtime.Lock()
+	v4Runtime.health[key].NextProbeAt = time.Now().Add(-time.Millisecond)
+	v4Runtime.Unlock()
+	_, owned := nextHealthyCandidateV4(p, r, ranked, map[string]bool{}, failNext, int(^uint(0)>>1))
+	if !owned {
+		t.Fatal("expected first half-open probe ownership")
+	}
+	recordCandidateFailureV4(p, r, a, 503, nil, nil, true)
+	clearProbeOwnershipV4(&owned)
+	if owned {
+		t.Fatal("resolved probe ownership remained active")
+	}
+
+	v4Runtime.Lock()
+	v4Runtime.health[key].NextProbeAt = time.Now().Add(-time.Millisecond)
+	v4Runtime.Unlock()
+	_, second := nextHealthyCandidateV4(p, r, ranked, map[string]bool{}, failNext, int(^uint(0)>>1))
+	if !second {
+		t.Fatal("expected second half-open probe ownership")
+	}
+	releaseCandidateProbeV4(p, r, a, owned)
+	v4Runtime.RLock()
+	stillInFlight := v4Runtime.health[key].ProbeInFlight
+	v4Runtime.RUnlock()
+	if !stillInFlight {
+		t.Fatal("stale resolved ownership released a later probe lease")
+	}
+}
+
+func TestIssue13StreamErrorStatusClassification(t *testing.T) {
+	resetIssue13Health(t)
+	p, r, ranked := issue13Fixture()
+	a := ranked[0]
+
+	notFound := errors.New("stream read failed: upstream status 404")
+	status := statusFromError(notFound)
+	if status != 404 {
+		t.Fatalf("statusFromError(404)=%d, want 404", status)
+	}
+	recordCandidateFailureV4(p, r, a, status, notFound, nil)
+	if view := candidateHealthViewV4(p, r, a); view.State != healthClosed {
+		t.Fatalf("request-specific 404 must not open circuit: %#v", view)
+	}
+
+	rateLimited := errors.New("stream read failed: HTTP 429 rate limited")
+	status = statusFromError(rateLimited)
+	if status != 429 {
+		t.Fatalf("statusFromError(429)=%d, want 429", status)
+	}
+	recordCandidateFailureV4(p, r, a, status, rateLimited, nil)
+	view := candidateHealthViewV4(p, r, a)
+	if view.State != healthOpen {
+		t.Fatalf("429 must open circuit: %#v", view)
+	}
+}
+
+func TestIssue13MaterialCandidateConfigChangeResetsHealth(t *testing.T) {
+	resetIssue13Health(t)
+	p, r, ranked := issue13Fixture()
+	a := ranked[0]
+	recordCandidateFailureV4(p, r, a, 503, nil, nil)
+	key := candidateHealthKeyV4(p, r, a)
+
+	// Selection-only tuning must preserve endpoint health.
+	weightOnly := clonePolicyV4(p)
+	weightOnly.Rules[0].Candidates[0].Weight = 9
+	v4Runtime.Lock()
+	resetChangedCandidateHealthLockedV4(p, weightOnly)
+	_, stillPresent := v4Runtime.health[key]
+	v4Runtime.Unlock()
+	if !stillPresent {
+		t.Fatal("weight-only change unexpectedly reset candidate health")
+	}
+
+	// A material execution change fixes/replaces the upstream target and must
+	// immediately discard the stale OPEN state rather than waiting for cooldown.
+	changed := clonePolicyV4(p)
+	changed.Rules[0].Candidates[0].OverrideModel = "fixed-model"
+	v4Runtime.Lock()
+	resetChangedCandidateHealthLockedV4(p, changed)
+	_, stillPresent = v4Runtime.health[key]
+	v4Runtime.Unlock()
+	if stillPresent {
+		t.Fatal("material candidate config change retained stale health state")
+	}
+}
+
+func TestIssue13SupersededCandidateResultsCannotRecreateHealth(t *testing.T) {
+	resetIssue13Health(t)
+	p, r, ranked := issue13Fixture()
+	oldCandidate := ranked[0]
+	key := candidateHealthKeyV4(p, r, oldCandidate)
+
+	recordCandidateFailureV4(p, r, oldCandidate, 503, nil, nil)
+	changed := clonePolicyV4(p)
+	changed.Rules[0].Candidates[0].OverrideModel = "fixed-model"
+	v4Runtime.Lock()
+	resetChangedCandidateHealthLockedV4(v4Runtime.state.Policies[p.KeyFingerprint], changed)
+	v4Runtime.state.Policies[p.KeyFingerprint] = clonePolicyV4(changed)
+	_, presentAfterSave := v4Runtime.health[key]
+	v4Runtime.Unlock()
+	if presentAfterSave {
+		t.Fatal("material config save retained old candidate health")
+	}
+
+	recordCandidateFailureV4(p, r, oldCandidate, 503, nil, nil)
+	recordCandidateSuccessV4(p, r, oldCandidate, false)
+	releaseCandidateProbeV4(p, r, oldCandidate, true)
+	v4Runtime.RLock()
+	_, recreated := v4Runtime.health[key]
+	v4Runtime.RUnlock()
+	if recreated {
+		t.Fatal("superseded candidate result recreated health for replacement config")
+	}
+
+	currentRule := changed.Rules[0]
+	currentCandidate := currentRule.Candidates[0]
+	recordCandidateFailureV4(changed, currentRule, currentCandidate, 503, nil, nil)
+	v4Runtime.RLock()
+	current := v4Runtime.health[key]
+	v4Runtime.RUnlock()
+	if current == nil || current.State != healthOpen {
+		t.Fatalf("current replacement candidate failure was ignored: %#v", current)
+	}
+}
+
+func TestIssue13HealthSkipReasonExplainsActualSelection(t *testing.T) {
+	resetIssue13Health(t)
+	p, r, ranked := issue13Fixture()
+	recordCandidateFailureV4(p, r, ranked[0], 503, nil, nil)
+	c, probe, skips := nextHealthyCandidateWithSkipsV4(p, r, ranked, map[string]bool{}, failNext, int(^uint(0)>>1))
+	if c == nil || c.ID != "b" || probe {
+		t.Fatalf("got candidate=%v probe=%v, want healthy B", c, probe)
+	}
+	if len(skips) != 1 || !strings.Contains(skips[0], "A") || !strings.Contains(skips[0], "OPEN") {
+		t.Fatalf("health skips=%#v, want A OPEN explanation", skips)
+	}
+	ev := RoutingEvent{Attempts: []attemptResult{{Candidate: c.Name, Provider: c.Provider, AuthIndex: c.AuthIndex}}, ruleSnapshot: cloneRuleV4(r), healthSkips: [][]string{skips}}
+	enrichRoutingSelectionReasonsV6(&ev)
+	if len(ev.SelectionReasons) != 1 || !strings.Contains(ev.SelectionReasons[0], "健康过滤") || !strings.Contains(ev.SelectionReasons[0], "A") || !strings.Contains(ev.SelectionReasons[0], "B") {
+		t.Fatalf("selection reason=%#v, want health-aware A->B explanation", ev.SelectionReasons)
+	}
+}
