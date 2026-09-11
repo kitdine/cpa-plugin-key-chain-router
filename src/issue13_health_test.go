@@ -97,10 +97,11 @@ func TestIssue13ProbeFailureUsesExponentialBackoff(t *testing.T) {
 	v4Runtime.Lock()
 	v4Runtime.health[key].NextProbeAt = time.Now().Add(-time.Millisecond)
 	v4Runtime.Unlock()
-	if got, probe := nextHealthyCandidateV4(p, r, ranked, map[string]bool{}, failNext, int(^uint(0)>>1)); got == nil || got.ID != "a" || !probe {
+	got, probe := nextHealthyCandidateV4(p, r, ranked, map[string]bool{}, failNext, int(^uint(0)>>1))
+	if got == nil || got.ID != "a" || !probe {
 		t.Fatalf("expected half-open A probe, got=%v probe=%v", got, probe)
 	}
-	recordCandidateFailureV4(p, r, a, 503, nil, nil)
+	recordCandidateFailureV4(p, r, a, 503, nil, nil, probe)
 	v4Runtime.RLock()
 	second := v4Runtime.health[key].NextProbeAt.Sub(v4Runtime.health[key].LastFailureAt)
 	v4Runtime.RUnlock()
@@ -132,5 +133,50 @@ func TestIssue13NonHealthFailureDoesNotOpenClosedCandidate(t *testing.T) {
 	view := candidateHealthViewV4(p, r, a)
 	if view.State != healthClosed {
 		t.Fatalf("400 must not open circuit: %#v", view)
+	}
+}
+
+func TestIssue13ConcurrentClosedFailuresDoNotEscalateBackoff(t *testing.T) {
+	resetIssue13Health(t)
+	p, r, ranked := issue13Fixture()
+	a := ranked[0]
+	recordCandidateFailureV4(p, r, a, 503, nil, nil)
+	key := candidateHealthKeyV4(p, r, a)
+	v4Runtime.RLock()
+	deadline := v4Runtime.health[key].NextProbeAt
+	level := v4Runtime.health[key].BackoffLevel
+	v4Runtime.RUnlock()
+	if level != 0 {
+		t.Fatalf("initial normal failure backoff=%d, want 0", level)
+	}
+	for i := 0; i < 8; i++ {
+		recordCandidateFailureV4(p, r, a, 503, nil, nil)
+	}
+	v4Runtime.RLock()
+	after := *v4Runtime.health[key]
+	v4Runtime.RUnlock()
+	if after.BackoffLevel != 0 {
+		t.Fatalf("concurrent normal failures escalated backoff=%d, want 0", after.BackoffLevel)
+	}
+	if !after.NextProbeAt.Equal(deadline) {
+		t.Fatalf("concurrent normal failures moved deadline: before=%v after=%v", deadline, after.NextProbeAt)
+	}
+}
+
+func TestIssue13LateFailureNeverShortensRetryAfterDeadline(t *testing.T) {
+	resetIssue13Health(t)
+	p, r, ranked := issue13Fixture()
+	a := ranked[0]
+	recordCandidateFailureV4(p, r, a, 429, nil, http.Header{"Retry-After": []string{"240"}})
+	key := candidateHealthKeyV4(p, r, a)
+	v4Runtime.RLock()
+	longDeadline := v4Runtime.health[key].NextProbeAt
+	v4Runtime.RUnlock()
+	recordCandidateFailureV4(p, r, a, 503, nil, nil)
+	v4Runtime.RLock()
+	after := v4Runtime.health[key].NextProbeAt
+	v4Runtime.RUnlock()
+	if !after.Equal(longDeadline) {
+		t.Fatalf("late transient failure changed longer Retry-After deadline: before=%v after=%v", longDeadline, after)
 	}
 }

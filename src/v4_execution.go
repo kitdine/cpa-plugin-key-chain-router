@@ -21,7 +21,7 @@ func runNonStreamPolicyV4(trace string, p *Policy, r *PolicyRule, ranked []*Poli
 		max = len(ranked) + 1
 	}
 	for len(event.Attempts) < max {
-		c, _ := nextHealthyCandidateV4(p, r, ranked, attempted, failNext, currentPriority)
+		c, probe := nextHealthyCandidateV4(p, r, ranked, attempted, failNext, currentPriority)
 		if c == nil {
 			break
 		}
@@ -44,7 +44,7 @@ func runNonStreamPolicyV4(trace string, p *Policy, r *PolicyRule, ranked []*Poli
 		} else {
 			lastErr = fmt.Errorf("upstream status %d", resp.StatusCode)
 		}
-		recordCandidateFailureV4(p, r, c, ar.Status, err, resp.Headers)
+		recordCandidateFailureV4(p, r, c, ar.Status, err, resp.Headers, probe)
 		action := failureActionV4(r.Failover, ar.Status, err)
 		if action == failCPADefault {
 			return executeCPADefaultV4(event, source, clientModel, body, headers, query, alt, callbackID, started)
@@ -223,7 +223,7 @@ func runStreamPolicyV4(trace string, p *Policy, r *PolicyRule, ranked []*PolicyC
 		}
 	}()
 	for len(event.Attempts) < max {
-		c, _ := nextHealthyCandidateV4(p, r, ranked, attempted, failNext, currentPriority)
+		c, probe := nextHealthyCandidateV4(p, r, ranked, attempted, failNext, currentPriority)
 		if c == nil {
 			break
 		}
@@ -250,7 +250,7 @@ func runStreamPolicyV4(trace string, p *Policy, r *PolicyRule, ranked []*PolicyC
 			ar.Status = statusFromError(err)
 			event.Attempts = append(event.Attempts, ar)
 			lastErr = err
-			recordCandidateFailureV4(p, r, c, ar.Status, err, nil)
+			recordCandidateFailureV4(p, r, c, ar.Status, err, nil, probe)
 			action := failureActionV4(r.Failover, ar.Status, err)
 			if action == failCPADefault {
 				runCPADefaultStreamV4(event, source, clientModel, body, headers, query, alt, callbackID, outStreamID, started)
@@ -271,7 +271,7 @@ func runStreamPolicyV4(trace string, p *Policy, r *PolicyRule, ranked []*PolicyC
 			ar.Error = err.Error()
 			event.Attempts = append(event.Attempts, ar)
 			lastErr = err
-			recordCandidateFailureV4(p, r, c, 0, err, nil)
+			recordCandidateFailureV4(p, r, c, 0, err, nil, probe)
 			continue
 		}
 		ar.Status = sr.StatusCode
@@ -282,7 +282,7 @@ func runStreamPolicyV4(trace string, p *Policy, r *PolicyRule, ranked []*PolicyC
 			}
 			lastErr = fmt.Errorf("upstream status %d", sr.StatusCode)
 			event.Attempts[len(event.Attempts)-1].Error = lastErr.Error()
-			recordCandidateFailureV4(p, r, c, sr.StatusCode, nil, sr.Headers)
+			recordCandidateFailureV4(p, r, c, sr.StatusCode, nil, sr.Headers, probe)
 			action := failureActionV4(r.Failover, sr.StatusCode, nil)
 			if action == failCPADefault {
 				runCPADefaultStreamV4(event, source, clientModel, body, headers, query, alt, callbackID, outStreamID, started)
@@ -301,7 +301,7 @@ func runStreamPolicyV4(trace string, p *Policy, r *PolicyRule, ranked []*PolicyC
 		if sr.StreamID == "" {
 			lastErr = errors.New("host stream id 为空")
 			event.Attempts[len(event.Attempts)-1].Error = lastErr.Error()
-			recordCandidateFailureV4(p, r, c, 0, lastErr, sr.Headers)
+			recordCandidateFailureV4(p, r, c, 0, lastErr, sr.Headers, probe)
 			continue
 		}
 		first := true
@@ -310,7 +310,7 @@ func runStreamPolicyV4(trace string, p *Policy, r *PolicyRule, ranked []*PolicyC
 			if e != nil {
 				_ = closeHostStream(sr.StreamID)
 				lastErr = e
-				recordCandidateFailureV4(p, r, c, statusFromError(e), e, sr.Headers)
+				recordCandidateFailureV4(p, r, c, statusFromError(e), e, sr.Headers, probe)
 				if first {
 					event.Attempts[len(event.Attempts)-1].Error = e.Error()
 					event.Attempts[len(event.Attempts)-1].Status = statusFromError(e)
@@ -326,7 +326,7 @@ func runStreamPolicyV4(trace string, p *Policy, r *PolicyRule, ranked []*PolicyC
 			if rr.Error != "" {
 				_ = closeHostStream(sr.StreamID)
 				lastErr = errors.New(rr.Error)
-				recordCandidateFailureV4(p, r, c, 0, lastErr, sr.Headers)
+				recordCandidateFailureV4(p, r, c, 0, lastErr, sr.Headers, probe)
 				if first {
 					event.Attempts[len(event.Attempts)-1].Error = rr.Error
 					break

@@ -239,7 +239,7 @@ func candidateFailureCooldownV4(status int, err error, headers http.Header, back
 	return cooldown, true
 }
 
-func recordCandidateFailureV4(p *Policy, r *PolicyRule, c *PolicyCandidate, status int, err error, headers http.Header) {
+func recordCandidateFailureV4(p *Policy, r *PolicyRule, c *PolicyCandidate, status int, err error, headers http.Header, probeAttempt ...bool) {
 	key := candidateHealthKeyV4(p, r, c)
 	if key == "" {
 		return
@@ -248,11 +248,16 @@ func recordCandidateFailureV4(p *Policy, r *PolicyRule, c *PolicyCandidate, stat
 	v4Runtime.Lock()
 	defer v4Runtime.Unlock()
 	h := candidateHealthStateLockedV4(key)
-	cooldown, qualifies := candidateFailureCooldownV4(status, err, headers, h.BackoffLevel, now)
+	isProbe := len(probeAttempt) > 0 && probeAttempt[0]
+	level := h.BackoffLevel
+	if isProbe && level < 30 {
+		level++
+	}
+	cooldown, qualifies := candidateFailureCooldownV4(status, err, headers, level, now)
 	if !qualifies {
 		// A half-open probe that reaches the upstream and receives a request-specific
 		// non-health status proves transport reachability; do not strand the lease.
-		if h.ProbeInFlight || h.State == healthHalfOpen {
+		if isProbe && (h.ProbeInFlight || h.State == healthHalfOpen) {
 			h.State = healthClosed
 			h.ProbeInFlight = false
 			h.ConsecutiveFailures = 0
@@ -262,8 +267,36 @@ func recordCandidateFailureV4(p *Policy, r *PolicyRule, c *PolicyCandidate, stat
 		}
 		return
 	}
-	h.State = healthOpen
-	h.ProbeInFlight = false
+
+	proposedDeadline := now.Add(cooldown)
+	wasClosed := h.State == "" || h.State == healthClosed
+	switch {
+	case isProbe:
+		// Only a failed half-open recovery probe advances exponential backoff.
+		h.BackoffLevel = level
+		h.State = healthOpen
+		h.ProbeInFlight = false
+		h.OpenedAt = now
+		h.NextProbeAt = proposedDeadline
+	case wasClosed:
+		// First failure opens the circuit at the base cooldown. Concurrent attempts
+		// that were already in flight must not escalate the backoff level.
+		h.State = healthOpen
+		h.ProbeInFlight = false
+		h.OpenedAt = now
+		h.NextProbeAt = proposedDeadline
+	default:
+		// This is a stale normal attempt that started before another request opened
+		// the circuit (or while a recovery probe is now running). Do not alter the
+		// state, probe lease, or backoff. Only stronger auth/rate-limit deadlines may
+		// extend an existing open deadline; never shorten it.
+		if status == 401 || status == 403 || status == 429 {
+			if h.NextProbeAt.IsZero() || proposedDeadline.After(h.NextProbeAt) {
+				h.NextProbeAt = proposedDeadline
+			}
+		}
+	}
+
 	h.ConsecutiveFailures++
 	h.LastStatus = status
 	h.LastError = ""
@@ -271,11 +304,6 @@ func recordCandidateFailureV4(p *Policy, r *PolicyRule, c *PolicyCandidate, stat
 		h.LastError = err.Error()
 	}
 	h.LastFailureAt = now
-	h.OpenedAt = now
-	h.NextProbeAt = now.Add(cooldown)
-	if h.BackoffLevel < 30 {
-		h.BackoffLevel++
-	}
 }
 
 func recordCandidateSuccessV4(p *Policy, r *PolicyRule, c *PolicyCandidate) {
