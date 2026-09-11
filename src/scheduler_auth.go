@@ -76,19 +76,19 @@ func authIDFromEntries(entries []hostAuthEntry, authIndex, provider string) stri
 	return matchedID
 }
 
-func schedulerCandidateEligible(candidates []any, authIndex, provider string) bool {
-	authIndex = strings.TrimSpace(authIndex)
+func schedulerCandidateEligible(candidates []any, authID, provider string) bool {
+	authID = strings.TrimSpace(authID)
 	provider = strings.TrimSpace(provider)
-	if authIndex == "" {
+	if authID == "" {
 		return false
 	}
 	for _, raw := range candidates {
 		m := anyMap(raw)
-		idx := stringAny(m, "AuthIndex")
-		if idx == "" {
-			idx = stringAny(m, "auth_index")
+		id := stringAny(m, "ID")
+		if id == "" {
+			id = stringAny(m, "id")
 		}
-		if strings.TrimSpace(idx) != authIndex {
+		if strings.TrimSpace(id) != authID {
 			continue
 		}
 		candidateProvider := stringAny(m, "Provider")

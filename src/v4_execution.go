@@ -122,8 +122,10 @@ func executeCandidateV4(c *PolicyCandidate, source, clientModel string, body []b
 	}
 	h := cloneHeader(headers)
 	h.Del(ticketHeader)
+	ticket := ""
 	if c.AuthIndex != "" {
-		h.Set(ticketHeader, issueTicket(c.AuthIndex, c.Provider))
+		ticket = issueTicket(c.AuthIndex, c.Provider)
+		h.Set(ticketHeader, ticket)
 	}
 	started := time.Now()
 	method := methodHostModelExecute
@@ -131,6 +133,7 @@ func executeCandidateV4(c *PolicyCandidate, source, clientModel string, body []b
 		method = methodHostModelExecuteStream
 	}
 	raw, err := callHost(method, map[string]any{"entry_protocol": source, "exit_protocol": source, "model": model, "stream": stream, "body": rewriteBodyModel(body, model), "headers": h, "query": query, "alt": alt, "host_callback_id": callbackID})
+	revokeTicket(ticket)
 	ar := attemptResult{Candidate: c.Name, Provider: c.Provider, AuthIndex: c.AuthIndex, Model: model, Duration: time.Since(started)}
 	ar.DurationMs = ar.Duration.Milliseconds()
 	if err != nil {
@@ -230,11 +233,14 @@ func runStreamPolicyV4(trace string, p *Policy, r *PolicyRule, ranked []*PolicyC
 		}
 		h := cloneHeader(headers)
 		h.Del(ticketHeader)
+		ticket := ""
 		if c.AuthIndex != "" {
-			h.Set(ticketHeader, issueTicket(c.AuthIndex, c.Provider))
+			ticket = issueTicket(c.AuthIndex, c.Provider)
+			h.Set(ticketHeader, ticket)
 		}
 		t := time.Now()
 		raw, err := callHost(methodHostModelExecuteStream, map[string]any{"entry_protocol": source, "exit_protocol": source, "model": model, "stream": true, "body": rewriteBodyModel(body, model), "headers": h, "query": query, "alt": alt, "host_callback_id": callbackID})
+		revokeTicket(ticket)
 		ar := attemptResult{Candidate: c.Name, Provider: c.Provider, AuthIndex: c.AuthIndex, Model: model, Duration: time.Since(t)}
 		ar.DurationMs = ar.Duration.Milliseconds()
 		if err != nil {

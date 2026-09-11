@@ -190,6 +190,7 @@ type ticketRecord struct {
 	AuthIndex string
 	Provider  string
 	ExpiresAt time.Time
+	Claimed   bool
 }
 
 type apiResource struct {
@@ -637,9 +638,12 @@ func handleSchedulerPick(raw []byte) ([]byte, error) {
 	if tok == "" {
 		return okEnvelope(map[string]any{"Handled": false})
 	}
-	rec, ok := consumeTicket(tok)
+	rec, ok, firstClaim := claimTicket(tok)
 	if !ok {
-		return okEnvelope(map[string]any{"Handled": false})
+		return nil, errors.New("kcr ticket is invalid or expired; refusing CPA scheduler fallback")
+	}
+	if !firstClaim {
+		return nil, errors.New("kcr ticket was already claimed; refusing CPA credential fallback inside one KCR attempt")
 	}
 	provider := strings.TrimSpace(rec.Provider)
 	if provider == "" {
@@ -648,16 +652,16 @@ func handleSchedulerPick(raw []byte) ([]byte, error) {
 			provider = stringAny(req, "provider")
 		}
 	}
+	authID, err := resolveAuthIDByIndex(rec.AuthIndex, provider)
+	if err != nil {
+		return nil, fmt.Errorf("kcr auth resolution failed: %w", err)
+	}
 	candidates := anySlice(req["Candidates"])
 	if len(candidates) == 0 {
 		candidates = anySlice(req["candidates"])
 	}
-	if !schedulerCandidateEligible(candidates, rec.AuthIndex, provider) {
-		return okEnvelope(map[string]any{"Handled": true, "AuthID": "", "Reason": "kcr_candidate_ineligible"})
-	}
-	authID, err := resolveAuthIDByIndex(rec.AuthIndex, provider)
-	if err != nil {
-		return okEnvelope(map[string]any{"Handled": true, "AuthID": "", "Reason": "kcr_auth_resolution_failed"})
+	if !schedulerCandidateEligible(candidates, authID, provider) {
+		return nil, errors.New("kcr pinned credential is not eligible in the current CPA candidate set")
 	}
 	return okEnvelope(map[string]any{"Handled": true, "AuthID": authID})
 }
@@ -931,15 +935,29 @@ func issueTicket(authIndex, provider string) string {
 	cleanupTicketsLocked()
 	return tok
 }
-func consumeTicket(tok string) (ticketRecord, bool) {
+func claimTicket(tok string) (ticketRecord, bool, bool) {
 	runtimeState.Lock()
 	defer runtimeState.Unlock()
 	cleanupTicketsLocked()
 	r, ok := runtimeState.tickets[tok]
-	if ok {
-		delete(runtimeState.tickets, tok)
+	if !ok {
+		return ticketRecord{}, false, false
 	}
-	return r, ok
+	if r.Claimed {
+		return r, true, false
+	}
+	r.Claimed = true
+	runtimeState.tickets[tok] = r
+	return r, true, true
+}
+func revokeTicket(tok string) {
+	tok = strings.TrimSpace(tok)
+	if tok == "" {
+		return
+	}
+	runtimeState.Lock()
+	delete(runtimeState.tickets, tok)
+	runtimeState.Unlock()
 }
 func cleanupTicketsLocked() {
 	now := time.Now()
