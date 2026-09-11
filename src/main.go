@@ -648,6 +648,13 @@ func handleSchedulerPick(raw []byte) ([]byte, error) {
 			provider = stringAny(req, "provider")
 		}
 	}
+	candidates := anySlice(req["Candidates"])
+	if len(candidates) == 0 {
+		candidates = anySlice(req["candidates"])
+	}
+	if !schedulerCandidateEligible(candidates, rec.AuthIndex, provider) {
+		return okEnvelope(map[string]any{"Handled": true, "AuthID": "", "Reason": "kcr_candidate_ineligible"})
+	}
 	authID, err := resolveAuthIDByIndex(rec.AuthIndex, provider)
 	if err != nil {
 		return okEnvelope(map[string]any{"Handled": true, "AuthID": "", "Reason": "kcr_auth_resolution_failed"})

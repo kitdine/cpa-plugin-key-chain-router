@@ -1,6 +1,7 @@
 package main
 
 import (
+    "context"
     "database/sql"
     "encoding/json"
     "net/url"
@@ -15,8 +16,9 @@ var sqliteHealthV62 = struct {
     sync.RWMutex
     OpenedAt    string
     LastWriteAt string
-    LastError   string
-    LastErrorAt string
+    LastError    string
+    LastErrorAt  string
+    WriteHealthy bool
 }{}
 
 func resetSQLiteHealthV62() {
@@ -25,6 +27,7 @@ func resetSQLiteHealthV62() {
     sqliteHealthV62.LastWriteAt = ""
     sqliteHealthV62.LastError = ""
     sqliteHealthV62.LastErrorAt = ""
+    sqliteHealthV62.WriteHealthy = false
     sqliteHealthV62.Unlock()
 }
 
@@ -33,6 +36,7 @@ func recordSQLiteOpenV62(path string) {
     sqliteHealthV62.OpenedAt = nowV4()
     sqliteHealthV62.LastError = ""
     sqliteHealthV62.LastErrorAt = ""
+    sqliteHealthV62.WriteHealthy = true
     sqliteHealthV62.Unlock()
     _ = path
 }
@@ -51,17 +55,32 @@ func recordSQLiteWriteV62(err error) {
     if err == nil {
         sqliteHealthV62.Lock()
         sqliteHealthV62.LastWriteAt = nowV4()
-        sqliteHealthV62.LastError = ""
-        sqliteHealthV62.LastErrorAt = ""
+        // Once an event has been lost, keep the writer degraded until the sink is
+        // restarted. Later successful inserts cannot backfill the missing event.
+        if sqliteHealthV62.WriteHealthy {
+            sqliteHealthV62.LastError = ""
+            sqliteHealthV62.LastErrorAt = ""
+        }
         sqliteHealthV62.Unlock()
         return
     }
-    recordSQLiteOpenErrorV62(err)
+    sqliteHealthV62.Lock()
+    sqliteHealthV62.WriteHealthy = false
+    sqliteHealthV62.LastError = err.Error()
+    sqliteHealthV62.LastErrorAt = nowV4()
+    sqliteHealthV62.Unlock()
     _, _ = callHost("host.log", map[string]any{
         "level": "error",
-        "message": "kcr sqlite write failed",
+        "message": "kcr sqlite write failed; routing history queries will use memory until sqlite restarts",
         "fields": map[string]any{"error": err.Error()},
     })
+}
+
+func sqliteWriterHealthyV62() bool {
+    sqliteHealthV62.RLock()
+    healthy := sqliteHealthV62.WriteHealthy
+    sqliteHealthV62.RUnlock()
+    return healthy
 }
 
 func resolvedSQLitePathV62(raw string) string {
@@ -111,6 +130,7 @@ func sqliteStatusV62() map[string]any {
     lastWriteAt := sqliteHealthV62.LastWriteAt
     lastError := sqliteHealthV62.LastError
     lastErrorAt := sqliteHealthV62.LastErrorAt
+    writeHealthy := sqliteHealthV62.WriteHealthy
     sqliteHealthV62.RUnlock()
 
     out := map[string]any{
@@ -121,6 +141,7 @@ func sqliteStatusV62() map[string]any {
         "last_write_at": lastWriteAt,
         "last_error": lastError,
         "last_error_at": lastErrorAt,
+        "write_healthy": writeHealthy,
         "events": 0,
         "attempts": 0,
         "file_exists": false,
@@ -161,7 +182,7 @@ func queryEventsSQLiteV62(q url.Values) (map[string]any, bool) {
     obs := normalizeObservability(v4Runtime.state.Observability)
     sink := v4Runtime.sqlite
     v4Runtime.RUnlock()
-    if !obs.SQLiteEnabled || sink == nil || sink.db == nil {
+    if !obs.SQLiteEnabled || sink == nil || sink.db == nil || !sqliteWriterHealthyV62() {
         return nil, false
     }
     out, err := querySQLiteEventsV62(sink.db, q, obs)
@@ -173,7 +194,18 @@ func queryEventsSQLiteV62(q url.Values) (map[string]any, bool) {
     return out, true
 }
 
+type sqliteQueryerV62 interface {
+    Query(query string, args ...any) (*sql.Rows, error)
+    QueryRow(query string, args ...any) *sql.Row
+}
+
 func querySQLiteEventsV62(db *sql.DB, q url.Values, obs ObservabilityConfig) (map[string]any, error) {
+    tx, err := db.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
+    if err != nil {
+        return nil, err
+    }
+    defer tx.Rollback()
+
     where, args := sqliteWhereV62(q)
     limit := parseEventLimitV6(q.Get("limit"))
 
@@ -190,33 +222,33 @@ func querySQLiteEventsV62(db *sql.DB, q url.Values, obs ObservabilityConfig) (ma
     statArgs = append(statArgs, args...)
     var total, handled, fallback, bypass, success, failed int
     var avgDuration, avgAttempts float64
-    if err := db.QueryRow(statSQL, statArgs...).Scan(&total, &handled, &fallback, &bypass, &success, &failed, &avgDuration, &avgAttempts); err != nil {
+    if err := tx.QueryRow(statSQL, statArgs...).Scan(&total, &handled, &fallback, &bypass, &success, &failed, &avgDuration, &avgAttempts); err != nil {
         return nil, err
     }
 
     p95 := int64(0)
     durationWhere := where + ` AND COALESCE(duration_ms,-1)>=0`
     var durationCount int
-    if err := db.QueryRow(`SELECT COUNT(*) FROM routing_events`+durationWhere, args...).Scan(&durationCount); err != nil {
+    if err := tx.QueryRow(`SELECT COUNT(*) FROM routing_events`+durationWhere, args...).Scan(&durationCount); err != nil {
         return nil, err
     }
     if durationCount > 0 {
         offset := (durationCount*95+99)/100 - 1
         p95Args := append([]any{}, args...)
         p95Args = append(p95Args, offset)
-        if err := db.QueryRow(`SELECT duration_ms FROM routing_events`+durationWhere+` ORDER BY duration_ms LIMIT 1 OFFSET ?`, p95Args...).Scan(&p95); err != nil {
+        if err := tx.QueryRow(`SELECT duration_ms FROM routing_events`+durationWhere+` ORDER BY duration_ms LIMIT 1 OFFSET ?`, p95Args...).Scan(&p95); err != nil {
             return nil, err
         }
     }
 
     var windowTotal int
-    if err := db.QueryRow(`SELECT COUNT(*) FROM routing_events WHERE COALESCE(reason,'') <> 'no_policy'`).Scan(&windowTotal); err != nil {
+    if err := tx.QueryRow(`SELECT COUNT(*) FROM routing_events WHERE COALESCE(reason,'') <> 'no_policy'`).Scan(&windowTotal); err != nil {
         return nil, err
     }
 
     queryArgs := append([]any{}, args...)
     queryArgs = append(queryArgs, limit)
-    rows, err := db.Query(`SELECT
+    rows, err := tx.Query(`SELECT
         COALESCE(trace_id,''), COALESCE(at,''), COALESCE(decision,''), COALESCE(reason,''),
         COALESCE(selection_reasons,''), COALESCE(policy_name,''), COALESCE(key_fingerprint,''), COALESCE(key_hint,''),
         COALESCE(rule_id,''), COALESCE(rule_name,''), COALESCE(strategy,''), COALESCE(model,''), COALESCE(stream,0),
@@ -259,7 +291,7 @@ func querySQLiteEventsV62(db *sql.DB, q url.Values, obs ObservabilityConfig) (ma
         for i := range traceIDs {
             attemptArgs[i] = traceIDs[i]
         }
-        ar, err := db.Query(`SELECT COALESCE(trace_id,''), COALESCE(sequence,0), COALESCE(candidate,''),
+        ar, err := tx.Query(`SELECT COALESCE(trace_id,''), COALESCE(sequence,0), COALESCE(candidate,''),
             COALESCE(provider,''), COALESCE(auth_index,''), COALESCE(model,''), COALESCE(status,0),
             COALESCE(error,''), COALESCE(duration_ms,0)
             FROM routing_attempts WHERE trace_id IN (`+ph+`) ORDER BY sequence`, attemptArgs...)
@@ -285,8 +317,11 @@ func querySQLiteEventsV62(db *sql.DB, q url.Values, obs ObservabilityConfig) (ma
         ar.Close()
     }
 
-    facets, err := sqliteFacetsV62(db)
+    facets, err := sqliteFacetsV62(tx)
     if err != nil {
+        return nil, err
+    }
+    if err := tx.Commit(); err != nil {
         return nil, err
     }
     successRate := float64(0)
@@ -363,7 +398,7 @@ func sqliteWhereV62(q url.Values) (string, []any) {
     return " WHERE " + strings.Join(clauses, " AND "), args
 }
 
-func sqliteFacetsV62(db *sql.DB) (map[string]any, error) {
+func sqliteFacetsV62(db sqliteQueryerV62) (map[string]any, error) {
     policies, err := sqliteFacetV62(db, `SELECT DISTINCT policy_name FROM routing_events WHERE COALESCE(reason,'') <> 'no_policy' AND COALESCE(policy_name,'') <> ''`)
     if err != nil { return nil, err }
     strategies, err := sqliteFacetV62(db, `SELECT DISTINCT strategy FROM routing_events WHERE COALESCE(reason,'') <> 'no_policy' AND COALESCE(strategy,'') <> ''`)
@@ -375,7 +410,7 @@ func sqliteFacetsV62(db *sql.DB) (map[string]any, error) {
     return map[string]any{"policies": policies, "strategies": strategies, "providers": providers, "models": models}, nil
 }
 
-func sqliteFacetV62(db *sql.DB, query string) ([]string, error) {
+func sqliteFacetV62(db sqliteQueryerV62, query string) ([]string, error) {
     rows, err := db.Query(query)
     if err != nil { return nil, err }
     defer rows.Close()

@@ -12,7 +12,7 @@ import (
 )
 
 func runNonStreamPolicyV4(trace string, p *Policy, r *PolicyRule, ranked []*PolicyCandidate, source, clientModel string, body []byte, headers http.Header, query url.Values, alt, callbackID string, started time.Time) (hostModelExecutionResponse, RoutingEvent, error) {
-	event := RoutingEvent{TraceID: trace, At: nowV4(), Decision: decisionHandled, PolicyName: p.Name, KeyFingerprint: p.KeyFingerprint, KeyHint: p.KeyHint, RuleID: r.ID, RuleName: r.Name, Strategy: r.Strategy, Model: clientModel, Stream: false}
+	event := RoutingEvent{TraceID: trace, At: nowV4(), Decision: decisionHandled, PolicyName: p.Name, KeyFingerprint: p.KeyFingerprint, KeyHint: p.KeyHint, RuleID: r.ID, RuleName: r.Name, Strategy: r.Strategy, Model: clientModel, Stream: false, ruleSnapshot: cloneRuleV4(r)}
 	attempted := map[string]bool{}
 	currentPriority := math.MaxInt
 	var lastErr error
@@ -204,7 +204,7 @@ func failureActionV4(f FailoverPolicy, status int, err error) string {
 }
 
 func runStreamPolicyV4(trace string, p *Policy, r *PolicyRule, ranked []*PolicyCandidate, source, clientModel string, body []byte, headers http.Header, query url.Values, alt, callbackID, outStreamID string, started time.Time) {
-	event := RoutingEvent{TraceID: trace, At: nowV4(), Decision: decisionHandled, PolicyName: p.Name, KeyFingerprint: p.KeyFingerprint, KeyHint: p.KeyHint, RuleID: r.ID, RuleName: r.Name, Strategy: r.Strategy, Model: clientModel, Stream: true}
+	event := RoutingEvent{TraceID: trace, At: nowV4(), Decision: decisionHandled, PolicyName: p.Name, KeyFingerprint: p.KeyFingerprint, KeyHint: p.KeyHint, RuleID: r.ID, RuleName: r.Name, Strategy: r.Strategy, Model: clientModel, Stream: true, ruleSnapshot: cloneRuleV4(r)}
 	attempted := map[string]bool{}
 	currentPriority := math.MaxInt
 	max := r.Failover.MaxAttempts
