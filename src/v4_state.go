@@ -115,6 +115,10 @@ func configureV4(statePath string, legacy State) error {
 	st.Observability = normalizeObservability(st.Observability)
 	normalizePolicies(&st)
 	v4Runtime.Lock()
+	v4Runtime.generation++
+	if v4Runtime.generation == 0 {
+		v4Runtime.generation = 1
+	}
 	v4Runtime.state = st
 	v4Runtime.recent = nil
 	v4Runtime.rr = map[string]uint64{}
