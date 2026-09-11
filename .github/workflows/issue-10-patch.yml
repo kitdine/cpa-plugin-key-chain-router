@@ -1,0 +1,49 @@
+name: Issue 10 Routing Correctness Patch
+
+on:
+  push:
+    branches:
+      - fix/issue-10-call-scoped-routing-guard
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: "!contains(github.event.head_commit.message, '[issue-10-patched]')"
+    runs-on: ubuntu-latest
+    container:
+      image: golang:1.26-bookworm
+    steps:
+      - name: Install tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git build-essential python3 nodejs ca-certificates file binutils zip
+          rm -rf /var/lib/apt/lists/*
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/issue-10-call-scoped-routing-guard
+          fetch-depth: 0
+      - name: Apply patch
+        run: python3 scripts/issue10_patch.py
+      - name: Format and test
+        run: |
+          gofmt -w src/main.go src/scheduler_auth.go src/v4_execution.go src/issue10_test.go
+          cd src
+          go test ./...
+          go vet ./...
+          node --check ui.js
+      - name: Build and ABI smoke
+        run: |
+          bash ./scripts/build.sh
+          VERSION="$(tr -d '[:space:]' < VERSION)"
+          cd src
+          python3 abi_smoke.py "../dist/key-chain-router-v${VERSION}.so"
+      - name: Commit fix
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/main.go src/scheduler_auth.go src/v4_execution.go src/abi_smoke.py src/issue10_test.go
+          git diff --cached --check
+          git commit -m 'fix: enforce one credential per KCR attempt (#10) [issue-10-patched]'
+          git push origin HEAD:fix/issue-10-call-scoped-routing-guard
