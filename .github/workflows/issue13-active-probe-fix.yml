@@ -32,7 +32,7 @@ jobs:
 
           hp = Path('src/v4_health.go')
           hs = hp.read_text()
-          helper = '''func clearProbeOwnershipV4(owned *bool) {\n\tif owned != nil {\n\t\t*owned = false\n\t}\n}\n\n'''
+          helper = 'func clearProbeOwnershipV4(owned *bool) {\n\tif owned != nil {\n\t\t*owned = false\n\t}\n}\n\n'
           marker = 'func releaseCandidateProbeV4('
           if 'func clearProbeOwnershipV4(' not in hs:
               if marker not in hs:
@@ -70,47 +70,45 @@ jobs:
           tp = Path('src/issue13_health_test.go')
           ts = tp.read_text()
           if 'TestIssue13ResolvedProbeOwnershipCannotReleaseLaterProbe' not in ts:
-              ts += r'''
-
-func TestIssue13ResolvedProbeOwnershipCannotReleaseLaterProbe(t *testing.T) {
-	resetIssue13Health(t)
-	p, r, ranked := issue13Fixture()
-	a := ranked[0]
-	key := candidateHealthKeyV4(p, r, a)
-
-	// Probe #1 is acquired and then resolved as a failed probe.
-	recordCandidateFailureV4(p, r, a, 503, nil, nil)
-	v4Runtime.Lock()
-	v4Runtime.health[key].NextProbeAt = time.Now().Add(-time.Millisecond)
-	v4Runtime.Unlock()
-	_, owned := nextHealthyCandidateV4(p, r, ranked, map[string]bool{}, failNext, int(^uint(0)>>1))
-	if !owned {
-		t.Fatal("expected first half-open probe ownership")
-	}
-	recordCandidateFailureV4(p, r, a, 503, nil, nil, true)
-	clearProbeOwnershipV4(&owned)
-	if owned {
-		t.Fatal("resolved probe ownership remained active")
-	}
-
-	// Later, a different request acquires probe #2. Cleanup from the old attempt
-	// must be a no-op because its ownership flag was cleared at resolution time.
-	v4Runtime.Lock()
-	v4Runtime.health[key].NextProbeAt = time.Now().Add(-time.Millisecond)
-	v4Runtime.Unlock()
-	_, second := nextHealthyCandidateV4(p, r, ranked, map[string]bool{}, failNext, int(^uint(0)>>1))
-	if !second {
-		t.Fatal("expected second half-open probe ownership")
-	}
-	releaseCandidateProbeV4(p, r, a, owned)
-	v4Runtime.RLock()
-	stillInFlight := v4Runtime.health[key].ProbeInFlight
-	v4Runtime.RUnlock()
-	if !stillInFlight {
-		t.Fatal("stale resolved ownership released a later probe lease")
-	}
-}
-'''
+              lines = [
+                  '',
+                  'func TestIssue13ResolvedProbeOwnershipCannotReleaseLaterProbe(t *testing.T) {',
+                  '\tresetIssue13Health(t)',
+                  '\tp, r, ranked := issue13Fixture()',
+                  '\ta := ranked[0]',
+                  '\tkey := candidateHealthKeyV4(p, r, a)',
+                  '',
+                  '\trecordCandidateFailureV4(p, r, a, 503, nil, nil)',
+                  '\tv4Runtime.Lock()',
+                  '\tv4Runtime.health[key].NextProbeAt = time.Now().Add(-time.Millisecond)',
+                  '\tv4Runtime.Unlock()',
+                  '\t_, owned := nextHealthyCandidateV4(p, r, ranked, map[string]bool{}, failNext, int(^uint(0)>>1))',
+                  '\tif !owned {',
+                  '\t\tt.Fatal("expected first half-open probe ownership")',
+                  '\t}',
+                  '\trecordCandidateFailureV4(p, r, a, 503, nil, nil, true)',
+                  '\tclearProbeOwnershipV4(&owned)',
+                  '\tif owned {',
+                  '\t\tt.Fatal("resolved probe ownership remained active")',
+                  '\t}',
+                  '',
+                  '\tv4Runtime.Lock()',
+                  '\tv4Runtime.health[key].NextProbeAt = time.Now().Add(-time.Millisecond)',
+                  '\tv4Runtime.Unlock()',
+                  '\t_, second := nextHealthyCandidateV4(p, r, ranked, map[string]bool{}, failNext, int(^uint(0)>>1))',
+                  '\tif !second {',
+                  '\t\tt.Fatal("expected second half-open probe ownership")',
+                  '\t}',
+                  '\treleaseCandidateProbeV4(p, r, a, owned)',
+                  '\tv4Runtime.RLock()',
+                  '\tstillInFlight := v4Runtime.health[key].ProbeInFlight',
+                  '\tv4Runtime.RUnlock()',
+                  '\tif !stillInFlight {',
+                  '\t\tt.Fatal("stale resolved ownership released a later probe lease")',
+                  '\t}',
+                  '}',
+              ]
+              ts += '\n'.join(lines) + '\n'
           tp.write_text(ts)
           PY
       - name: Format and test
