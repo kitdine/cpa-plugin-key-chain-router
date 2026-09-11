@@ -595,6 +595,7 @@ func pruneCandidateHealthLockedV4() {
 				if key := candidateHealthKeyV4(p, r, c); key != "" {
 					valid[key] = struct{}{}
 				}
+			}
 		}
 	}
 	for key := range v4Runtime.health {
