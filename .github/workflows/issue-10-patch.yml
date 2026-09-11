@@ -45,8 +45,10 @@ jobs:
         run: |
           ROOT=/__w/cpa-plugin-key-chain-router/cpa-plugin-key-chain-router
           test -d "$ROOT/.git"
-          git -C "$ROOT" config user.name 'github-actions[bot]'
-          git -C "$ROOT" config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git config --global --add safe.directory "$ROOT"
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git -C "$ROOT" status --short
           git -C "$ROOT" add src/main.go src/scheduler_auth.go src/v4_execution.go src/abi_smoke.py src/issue10_test.go src/review_findings_test.go
           git -C "$ROOT" diff --cached --check
           git -C "$ROOT" commit -m 'fix: enforce one credential per KCR attempt (#10) [issue-10-patched]'
