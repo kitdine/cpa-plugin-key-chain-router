@@ -180,3 +180,34 @@ func TestIssue13LateFailureNeverShortensRetryAfterDeadline(t *testing.T) {
 		t.Fatalf("late transient failure changed longer Retry-After deadline: before=%v after=%v", longDeadline, after)
 	}
 }
+
+func TestIssue13ProbeFailurePreservesLongerExistingDeadline(t *testing.T) {
+	resetIssue13Health(t)
+	p, r, ranked := issue13Fixture()
+	a := ranked[0]
+
+	recordCandidateFailureV4(p, r, a, 503, nil, nil)
+	key := candidateHealthKeyV4(p, r, a)
+	v4Runtime.Lock()
+	v4Runtime.health[key].NextProbeAt = time.Now().Add(-time.Millisecond)
+	v4Runtime.Unlock()
+	if got, probe := nextHealthyCandidateV4(p, r, ranked, map[string]bool{}, failNext, int(^uint(0)>>1)); got == nil || got.ID != "a" || !probe {
+		t.Fatalf("expected half-open A probe, got=%v probe=%v", got, probe)
+	}
+
+	recordCandidateFailureV4(p, r, a, 429, nil, http.Header{"Retry-After": []string{"240"}}, false)
+	v4Runtime.RLock()
+	longDeadline := v4Runtime.health[key].NextProbeAt
+	v4Runtime.RUnlock()
+	if time.Until(longDeadline) < 230*time.Second {
+		t.Fatalf("stale 429 did not establish long deadline: %v", longDeadline)
+	}
+
+	recordCandidateFailureV4(p, r, a, 503, nil, nil, true)
+	v4Runtime.RLock()
+	gotDeadline := v4Runtime.health[key].NextProbeAt
+	v4Runtime.RUnlock()
+	if gotDeadline.Before(longDeadline) {
+		t.Fatalf("probe failure shortened deadline: got=%v want>=%v", gotDeadline, longDeadline)
+	}
+}

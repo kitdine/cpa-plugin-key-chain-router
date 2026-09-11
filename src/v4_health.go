@@ -273,11 +273,15 @@ func recordCandidateFailureV4(p *Policy, r *PolicyRule, c *PolicyCandidate, stat
 	switch {
 	case isProbe:
 		// Only a failed half-open recovery probe advances exponential backoff.
+		// Preserve a stronger deadline that may have been extended by a stale
+		// 401/403/429 response while this probe was in flight.
 		h.BackoffLevel = level
 		h.State = healthOpen
 		h.ProbeInFlight = false
 		h.OpenedAt = now
-		h.NextProbeAt = proposedDeadline
+		if h.NextProbeAt.IsZero() || proposedDeadline.After(h.NextProbeAt) {
+			h.NextProbeAt = proposedDeadline
+		}
 	case wasClosed:
 		// First failure opens the circuit at the base cooldown. Concurrent attempts
 		// that were already in flight must not escalate the backoff level.
