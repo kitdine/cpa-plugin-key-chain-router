@@ -80,7 +80,7 @@ def host_call(ctx, method, req, n, out):
         captured_ticket=vals[0] if vals else None
         captured_model=payload.get('model')
         if captured_ticket:
-            req={'Provider':'codex','Model':captured_model,'Options':{'Headers':{'X-CPA-Key-Chain-Ticket':[captured_ticket]}},'Candidates':[{'ID':'real-auth-target','Provider':'codex'}]}
+            req={'Provider':'codex','Model':captured_model,'Options':{'Headers':{'X-CPA-Key-Chain-Ticket':[captured_ticket]}},'Candidates':[{'ID':'wrong-candidate-id','Provider':'codex','AuthIndex':'9b725f538a48ad68'}]}
             sch=pcall('scheduler.pick',req)
             assert sch['Handled'] is True and sch['AuthID']=='real-auth-target', sch
             scheduler_first_pick_count += 1
@@ -165,7 +165,7 @@ with tempfile.TemporaryDirectory() as td:
     assert scheduler_first_pick_count >= 1, scheduler_first_pick_count
     assert scheduler_second_pick_blocked is True
     try:
-        pcall('scheduler.pick',{'Provider':'codex','Model':'gpt-anything','Options':{'Headers':{'X-CPA-Key-Chain-Ticket':[first_ticket]}},'Candidates':[{'ID':'real-auth-target','Provider':'codex'}]})
+        pcall('scheduler.pick',{'Provider':'codex','Model':'gpt-anything','Options':{'Headers':{'X-CPA-Key-Chain-Ticket':[first_ticket]}},'Candidates':[{'ID':'wrong-candidate-id','Provider':'codex','AuthIndex':'9b725f538a48ad68'}]})
     except RuntimeError:
         pass
     else:

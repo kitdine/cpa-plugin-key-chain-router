@@ -660,7 +660,7 @@ func handleSchedulerPick(raw []byte) ([]byte, error) {
 	if len(candidates) == 0 {
 		candidates = anySlice(req["candidates"])
 	}
-	if !schedulerCandidateEligible(candidates, authID, provider) {
+	if !schedulerCandidateEligible(candidates, authID, rec.AuthIndex, provider) {
 		return nil, errors.New("kcr pinned credential is not eligible in the current CPA candidate set")
 	}
 	return okEnvelope(map[string]any{"Handled": true, "AuthID": authID})

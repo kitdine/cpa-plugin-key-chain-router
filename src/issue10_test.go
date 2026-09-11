@@ -33,21 +33,27 @@ func TestIssue10TicketCanOnlyBeClaimedOnceBeforeRevoke(t *testing.T) {
 	}
 }
 
-func TestIssue10SchedulerEligibilityUsesRuntimeAuthID(t *testing.T) {
-	candidates := []any{
+func TestIssue10SchedulerEligibilitySupportsCurrentAndLegacyIdentity(t *testing.T) {
+	current := []any{
 		map[string]any{"ID": "runtime-auth-a", "Provider": "codex"},
-		map[string]any{"id": "runtime-auth-b", "provider": "claude"},
 	}
-	if !schedulerCandidateEligible(candidates, "runtime-auth-a", "codex") {
+	if !schedulerCandidateEligible(current, "runtime-auth-a", "idx-a", "codex") {
 		t.Fatal("matching runtime AuthID must be eligible")
 	}
-	if schedulerCandidateEligible(candidates, "idx-a", "codex") {
-		t.Fatal("stable AuthIndex must not be mistaken for CPA scheduler candidate ID")
+
+	legacy := []any{
+		map[string]any{"id": "wrong-candidate-id", "auth_index": "idx-a", "provider": "codex"},
 	}
-	if schedulerCandidateEligible(candidates, "runtime-auth-a", "claude") {
+	if !schedulerCandidateEligible(legacy, "runtime-auth-a", "idx-a", "codex") {
+		t.Fatal("matching stable AuthIndex must preserve legacy candidate compatibility")
+	}
+	if schedulerCandidateEligible(legacy, "runtime-auth-b", "idx-b", "codex") {
+		t.Fatal("candidate must be rejected when neither AuthID nor AuthIndex matches")
+	}
+	if schedulerCandidateEligible(legacy, "runtime-auth-a", "idx-a", "claude") {
 		t.Fatal("provider mismatch must be rejected")
 	}
-	if schedulerCandidateEligible(nil, "runtime-auth-a", "codex") {
+	if schedulerCandidateEligible(nil, "runtime-auth-a", "idx-a", "codex") {
 		t.Fatal("empty candidate set must be rejected")
 	}
 }
