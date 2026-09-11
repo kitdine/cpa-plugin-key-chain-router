@@ -68,6 +68,11 @@ type PolicyCandidate struct {
 	Enabled       bool   `json:"enabled"`
 	Priority      int    `json:"priority"`
 	Weight        int    `json:"weight"`
+
+	// runtimeGeneration is stamped onto an acquired candidate clone. It is never
+	// serialized and lets delayed health results prove that they still belong to
+	// the currently configured runtime generation.
+	runtimeGeneration uint64
 }
 
 type FailoverPolicy struct {
@@ -132,12 +137,13 @@ type sqliteSink struct {
 
 var v4Runtime = struct {
 	sync.RWMutex
-	state  V4State
-	recent []RoutingEvent
-	rr     map[string]uint64
-	smooth map[string]map[string]int
-	health map[string]*candidateHealthState
-	sqlite *sqliteSink
+	state      V4State
+	recent     []RoutingEvent
+	rr         map[string]uint64
+	smooth     map[string]map[string]int
+	health     map[string]*candidateHealthState
+	sqlite     *sqliteSink
+	generation uint64
 }{
 	rr:     map[string]uint64{},
 	smooth: map[string]map[string]int{},
