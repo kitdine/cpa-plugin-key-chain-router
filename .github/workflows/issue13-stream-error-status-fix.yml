@@ -1,0 +1,70 @@
+name: Issue 13 Stream Error Status Fix
+
+on:
+  push:
+    branches:
+      - fix/issue-13-health-aware-failback
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: "!contains(github.event.head_commit.message, '[issue-13-stream-status-done]')"
+    runs-on: ubuntu-latest
+    container:
+      image: golang:1.26-bookworm
+    steps:
+      - name: Install tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git build-essential python3 nodejs ca-certificates file binutils zip
+          rm -rf /var/lib/apt/lists/*
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/issue-13-health-aware-failback
+          fetch-depth: 0
+      - name: Apply stream error status fix
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('src/v4_execution.go')
+          s = p.read_text()
+          old = '''\t\t\tif rr.Error != "" {\n\t\t\t\t_ = closeHostStream(sr.StreamID)\n\t\t\t\tlastErr = errors.New(rr.Error)\n\t\t\t\trecordCandidateFailureV4(p, r, c, 0, lastErr, sr.Headers, probe)\n\t\t\t\tclearProbeOwnershipV4(&activeProbe)\n\t\t\t\tif first {\n\t\t\t\t\tevent.Attempts[len(event.Attempts)-1].Error = rr.Error\n\t\t\t\t\taction := failureActionV4(r.Failover, 0, lastErr)\n'''
+          new = '''\t\t\tif rr.Error != "" {\n\t\t\t\t_ = closeHostStream(sr.StreamID)\n\t\t\t\tlastErr = errors.New(rr.Error)\n\t\t\t\tstreamStatus := statusFromError(lastErr)\n\t\t\t\trecordCandidateFailureV4(p, r, c, streamStatus, lastErr, sr.Headers, probe)\n\t\t\t\tclearProbeOwnershipV4(&activeProbe)\n\t\t\t\tif first {\n\t\t\t\t\tevent.Attempts[len(event.Attempts)-1].Error = rr.Error\n\t\t\t\t\tevent.Attempts[len(event.Attempts)-1].Status = streamStatus\n\t\t\t\t\taction := failureActionV4(r.Failover, streamStatus, lastErr)\n'''
+          if s.count(old) != 1:
+              raise SystemExit(f'expected one rr.Error block, got {s.count(old)}')
+          p.write_text(s.replace(old, new, 1))
+
+          t = Path('src/issue13_health_test.go')
+          ts = t.read_text()
+          if 'TestIssue13StreamErrorStatusClassification' not in ts:
+              ts += '''\n\nfunc TestIssue13StreamErrorStatusClassification(t *testing.T) {\n\tresetIssue13Health(t)\n\tp, r, ranked := issue13Fixture()\n\ta := ranked[0]\n\n\tnotFound := errors.New("stream read failed: upstream status 404")\n\tstatus := statusFromError(notFound)\n\tif status != 404 {\n\t\tt.Fatalf("statusFromError(404)=%d, want 404", status)\n\t}\n\trecordCandidateFailureV4(p, r, a, status, notFound, nil)\n\tif view := candidateHealthViewV4(p, r, a); view.State != healthClosed {\n\t\tt.Fatalf("request-specific 404 must not open circuit: %#v", view)\n\t}\n\n\trateLimited := errors.New("stream read failed: HTTP 429 rate limited")\n\tstatus = statusFromError(rateLimited)\n\tif status != 429 {\n\t\tt.Fatalf("statusFromError(429)=%d, want 429", status)\n\t}\n\trecordCandidateFailureV4(p, r, a, status, rateLimited, nil)\n\tview := candidateHealthViewV4(p, r, a)\n\tif view.State != healthOpen {\n\t\tt.Fatalf("429 must open circuit: %#v", view)\n\t}\n}\n'''
+          t.write_text(ts)
+          PY
+      - name: Format and test
+        run: |
+          gofmt -w src/v4_execution.go src/issue13_health_test.go
+          cd src
+          go test ./...
+          go vet ./...
+          node --check ui.js
+      - name: Build and ABI smoke
+        run: |
+          bash ./scripts/build.sh
+          VERSION="$(tr -d '[:space:]' < VERSION)"
+          cd src
+          python3 abi_smoke.py "../dist/key-chain-router-v${VERSION}.so"
+      - name: Commit fix and remove helper
+        run: |
+          ROOT="$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "$ROOT"
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          rm -f "$ROOT/.github/workflows/issue13-stream-error-status-fix.yml"
+          git -C "$ROOT" add -A
+          git -C "$ROOT" diff --cached --check
+          git -C "$ROOT" commit -m 'fix: classify stream read errors by status (#13) [issue-13-stream-status-done]'
+          git -C "$ROOT" pull --rebase origin fix/issue-13-health-aware-failback
+          git -C "$ROOT" push origin HEAD:fix/issue-13-health-aware-failback
