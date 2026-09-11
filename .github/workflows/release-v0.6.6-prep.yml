@@ -1,0 +1,79 @@
+name: Prepare v0.6.6 Release Metadata
+
+on:
+  push:
+    branches:
+      - release/v0.6.6
+
+permissions:
+  contents: write
+
+jobs:
+  prep:
+    if: "!contains(github.event.head_commit.message, '[v0.6.6-prep-done]')"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: release/v0.6.6
+          fetch-depth: 0
+      - name: Update version and changelog
+        run: |
+          printf '0.6.6\n' > VERSION
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('CHANGELOG.md')
+          s = p.read_text()
+          entry = '''## v0.6.6 - 2026-09-11
+
+新增 Health-aware Failover 与自动 Failback，使首选候选 A 发生持续故障后，后续请求不会反复先撞 A 再切到 B；A 恢复后通过受控探测自动回到原策略排序。
+
+### Circuit Breaker 与自动恢复
+
+- 候选健康状态跨请求维护 `CLOSED / OPEN / HALF_OPEN` 三态。
+- 首选候选发生可恢复故障后进入 OPEN；cooldown 内后续请求直接跳过它，继续使用健康 fallback 候选。
+- cooldown 到期后只允许一个请求持有 HALF_OPEN probe lease；并发请求继续走其他健康候选，避免恢复瞬间形成 probe thundering herd。
+- probe 成功后关闭 circuit 并恢复原有策略排序，因此 ordered / priority / sticky 等策略会自然自动 failback 到恢复后的首选候选。
+- probe 失败才推进指数退避，默认 30s → 60s → 120s → …，上限 5 分钟；普通并发旧请求不会错误放大 backoff。
+- 429 使用 60 秒基线并尊重更长的 `Retry-After`；401/403 使用 5 分钟 cooldown，后续失败不会缩短已有恢复期限。
+
+### 并发与配置正确性
+
+- stale normal success 无权取消已经建立的 OPEN / HALF_OPEN recovery cycle；只有真正持有当前 probe lease 的成功才能关闭 circuit。
+- stream panic / 本地输出失败会按 ownership 释放自己持有的 probe，不会释放其他请求的新 probe lease。
+- `next` / `same-priority-first` / `next-priority` 在健康过滤下保持原 FailoverPolicy 语义，不会因并发状态变化退化为其他优先级选择。
+- Candidate 的执行相关配置（resource/provider/auth/override model/enabled）发生变化时立即清理旧 health；旧配置下仍在途的请求结果会被识别为 superseded 并丢弃，不能重新污染新配置状态。
+- Streaming 首包/读流错误统一提取实际 HTTP status，避免 400/404 被误判为 network failure，429 也会进入正确的 RateLimit health/failover 语义。
+
+### 可观测性与诊断
+
+- Management snapshot 暴露 candidate health、backoff、next probe、last failure/success 与 probe-in-flight 状态。
+- 路由记录会明确说明因为 OPEN / HALF_OPEN probe-in-flight 跳过了哪些候选，以及健康过滤后实际执行了哪个候选。
+- 诊断 UI 新增健康状态和“当前路由”列，区分静态 rank 与当前真正可选/首选候选。
+
+### 测试与 Review
+
+- Non-streaming 与 streaming 共用同一健康状态与恢复语义。
+- 新增 cooldown skip、单 probe 并发、自动 failback、指数退避、Retry-After、stale success、probe ownership、配置变更与 superseded result、health-aware selection reason 等回归测试。
+- PR #14 通过 Go test、Go vet、JavaScript syntax、Linux amd64 c-shared build、ABI smoke、binary inspection 与 artifact packaging；Codex Review 最终完成。
+
+关联：Issue #13、PR #14。
+
+'''
+          marker = '# Changelog\n\n'
+          if '## v0.6.6 - 2026-09-11' not in s:
+              if not s.startswith(marker):
+                  raise SystemExit('unexpected CHANGELOG header')
+              s = marker + entry + s[len(marker):]
+              p.write_text(s)
+          PY
+      - name: Commit and remove helper
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          rm -f .github/workflows/release-v0.6.6-prep.yml
+          git add -A
+          git diff --cached --check
+          git commit -m 'release: prepare v0.6.6 [v0.6.6-prep-done]'
+          git pull --rebase origin release/v0.6.6
+          git push origin HEAD:release/v0.6.6
