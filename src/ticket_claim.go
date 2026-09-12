@@ -8,9 +8,13 @@ import (
 	"time"
 )
 
-// 422 is intentional: statusFromError classifies this as a local, non-health
-// failure, so scheduler ownership problems never open the candidate circuit.
-var errSchedulerTicketUnclaimed = errors.New("kcr scheduler did not claim execution ticket (routing control status 422); KCR is not the active CPA scheduler for this execution")
+// 422 is intentional: statusFromError classifies these as local, non-health
+// failures, so scheduler ownership/control problems never open the candidate
+// circuit for a credential KCR did not prove it selected.
+var (
+	errSchedulerTicketUnclaimed = errors.New("kcr scheduler did not claim execution ticket (routing control status 422); KCR is not the active CPA scheduler for this execution")
+	errSchedulerTicketIssue     = errors.New("kcr failed to issue execution ticket (routing control status 422); refusing unpinned CPA execution")
+)
 
 // issueExecutionTicketV8 creates a pin token whose lifetime is the enclosing
 // host.model.execute[_stream] attempt, not the short pre-claim ticket TTL.
