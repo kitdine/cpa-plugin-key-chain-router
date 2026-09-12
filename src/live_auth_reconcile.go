@@ -146,9 +146,9 @@ func legacyCurrentRuntimeIDsV8(rawConfig, staleAuthIndex, provider string) []str
 }
 
 // topMapHeadersV8 extracts a simple `headers:` string map for each top-level
-// list item in a config section. It accepts both block-style maps and the
-// flow-style maps accepted by CPA, while leaving the general lightweight parser
-// unchanged.
+// list item in a config section. It accepts block-style maps and both single-
+// and multi-line flow-style maps accepted by CPA, while leaving the general
+// lightweight parser unchanged.
 func topMapHeadersV8(lines []yamlLine, section string) []map[string]string {
 	start, end := sectionBounds(lines, section)
 	if start < 0 {
@@ -174,7 +174,8 @@ func topMapHeadersV8(lines []yamlLine, section string) []map[string]string {
 				continue
 			}
 			if strings.TrimSpace(value) != "" {
-				for hk, hv := range parseFlowStringMapV8(value) {
+				flow := collectFlowStringMapV8(value, lines, j+1, itemEnd)
+				for hk, hv := range parseFlowStringMapV8(flow) {
 					headers[hk] = hv
 				}
 				break
@@ -201,6 +202,54 @@ func topMapHeadersV8(lines []yamlLine, section string) []map[string]string {
 	return out
 }
 
+// collectFlowStringMapV8 completes a flow mapping that begins on the `headers:`
+// line and may continue across subsequent YAML lines. It only joins while the
+// outer braces remain unbalanced outside quotes; malformed collections remain
+// malformed and parseFlowStringMapV8 will fail closed.
+func collectFlowStringMapV8(initial string, lines []yamlLine, start, end int) string {
+	flow := strings.TrimSpace(initial)
+	if !strings.HasPrefix(flow, "{") || flowMapDepthV8(flow) <= 0 {
+		return flow
+	}
+	for i := start; i < end && flowMapDepthV8(flow) > 0; i++ {
+		flow += " " + strings.TrimSpace(lines[i].Text)
+	}
+	return strings.TrimSpace(flow)
+}
+
+func flowMapDepthV8(raw string) int {
+	depth := 0
+	var quote rune
+	escaped := false
+	for _, r := range raw {
+		if escaped {
+			escaped = false
+			continue
+		}
+		if quote == '"' && r == '\\' {
+			escaped = true
+			continue
+		}
+		if quote != 0 {
+			if r == quote {
+				quote = 0
+			}
+			continue
+		}
+		if r == '\'' || r == '"' {
+			quote = r
+			continue
+		}
+		switch r {
+		case '{':
+			depth++
+		case '}':
+			depth--
+		}
+	}
+	return depth
+}
+
 // parseFlowStringMapV8 parses the small YAML flow-map subset used by CPA's
 // credential `headers` field. Commas and colons inside quoted scalars are kept
 // as data, so common header values such as `"a,b:c"` hash identically to their
@@ -208,7 +257,7 @@ func topMapHeadersV8(lines []yamlLine, section string) []map[string]string {
 func parseFlowStringMapV8(raw string) map[string]string {
 	raw = strings.TrimSpace(raw)
 	out := map[string]string{}
-	if len(raw) < 2 || raw[0] != '{' || raw[len(raw)-1] != '}' {
+	if len(raw) < 2 || raw[0] != '{' || raw[len(raw)-1] != '}' || flowMapDepthV8(raw) != 0 {
 		return out
 	}
 	body := strings.TrimSpace(raw[1 : len(raw)-1])
