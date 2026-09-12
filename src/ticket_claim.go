@@ -5,7 +5,9 @@ import (
 	"strings"
 )
 
-var errSchedulerTicketUnclaimed = errors.New("kcr scheduler did not claim execution ticket; KCR is not the active CPA scheduler for this execution")
+// 422 is intentional: statusFromError classifies this as a local, non-health
+// failure, so scheduler ownership problems never open the candidate circuit.
+var errSchedulerTicketUnclaimed = errors.New("kcr scheduler did not claim execution ticket (routing control status 422); KCR is not the active CPA scheduler for this execution")
 
 // finishExecutionTicket consumes one execution ticket and reports whether KCR's
 // scheduler actually claimed it. A successful host.model.execute result is not
