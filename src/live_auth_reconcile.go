@@ -24,8 +24,10 @@ type liveAuthEntryV8 struct {
 // resolveLegacySyntheticAuthV8 bridges policies created by older KCR versions
 // that synthesized API-provider AuthIndex values from config.yaml. Current CPA
 // owns credential identity in its live AuthManager, so those hashes are not
-// authoritative anymore. Exact current CPA runtime IDs are preferred; base URL
-// is only a compatibility fallback and must still identify exactly one live auth.
+// authoritative anymore. Reconciliation is deliberately exact: the stale KCR
+// identity must uniquely reconstruct the current CPA StableID and that exact ID
+// must be present in host.auth.list. Provider/base-URL similarity is not enough
+// to prove that two API keys are the same credential.
 func resolveLegacySyntheticAuthV8(rawAuthList []byte, staleAuthIndex, provider string) (string, string, error) {
 	staleAuthIndex = strings.TrimSpace(staleAuthIndex)
 	provider = strings.TrimSpace(provider)
@@ -61,55 +63,38 @@ func resolveLegacySyntheticAuthV8(rawAuthList []byte, staleAuthIndex, provider s
 	if len(configMatches) != 1 {
 		return "", "", fmt.Errorf("legacy API auth index %q is ambiguous in CPA config", staleAuthIndex)
 	}
-	legacy := configMatches[0]
 
 	var live liveAuthListResponseV8
 	if err := json.Unmarshal(rawAuthList, &live); err != nil {
 		return "", "", fmt.Errorf("decode live auth list for legacy reconciliation: %w", err)
 	}
 
-	// Rebuild current CPA StableIDs from the legacy config entry, including
+	// Rebuild current CPA StableIDs from the exact legacy config entry, including
 	// proxy-url, normalized prefix and deterministically sorted custom headers.
 	exactIDs := legacyCurrentRuntimeIDsV8(configRaw, staleAuthIndex, provider)
-	if len(exactIDs) > 0 {
-		exactSet := make(map[string]struct{}, len(exactIDs))
-		for _, id := range exactIDs {
-			exactSet[id] = struct{}{}
-		}
-		exactMatches := make([]liveAuthEntryV8, 0, 1)
-		for _, entry := range live.Files {
-			if !liveAPIEntryMatchesProviderV8(entry, provider) {
-				continue
-			}
-			if _, ok := exactSet[strings.TrimSpace(entry.ID)]; ok {
-				exactMatches = append(exactMatches, entry)
-			}
-		}
-		if len(exactMatches) == 1 {
-			return strings.TrimSpace(exactMatches[0].ID), strings.TrimSpace(exactMatches[0].AuthIndex), nil
-		}
-		if len(exactMatches) > 1 {
-			return "", "", fmt.Errorf("legacy API auth index %q maps to multiple exact live CPA credentials", staleAuthIndex)
-		}
+	if len(exactIDs) == 0 {
+		return "", "", fmt.Errorf("legacy API auth index %q cannot be mapped to an exact current CPA runtime identity", staleAuthIndex)
 	}
-
-	liveMatches := make([]liveAuthEntryV8, 0, 1)
+	exactSet := make(map[string]struct{}, len(exactIDs))
+	for _, id := range exactIDs {
+		exactSet[id] = struct{}{}
+	}
+	exactMatches := make([]liveAuthEntryV8, 0, 1)
 	for _, entry := range live.Files {
 		if !liveAPIEntryMatchesProviderV8(entry, provider) {
 			continue
 		}
-		if !sameBaseURLV8(entry.BaseURL, legacy.BaseURL) {
-			continue
+		if _, ok := exactSet[strings.TrimSpace(entry.ID)]; ok {
+			exactMatches = append(exactMatches, entry)
 		}
-		liveMatches = append(liveMatches, entry)
 	}
-	if len(liveMatches) == 0 {
-		return "", "", nil
+	if len(exactMatches) == 1 {
+		return strings.TrimSpace(exactMatches[0].ID), strings.TrimSpace(exactMatches[0].AuthIndex), nil
 	}
-	if len(liveMatches) != 1 {
-		return "", "", fmt.Errorf("legacy API auth index %q matches %d live CPA credentials; refusing to guess", staleAuthIndex, len(liveMatches))
+	if len(exactMatches) > 1 {
+		return "", "", fmt.Errorf("legacy API auth index %q maps to multiple exact live CPA credentials", staleAuthIndex)
 	}
-	return strings.TrimSpace(liveMatches[0].ID), strings.TrimSpace(liveMatches[0].AuthIndex), nil
+	return "", "", fmt.Errorf("exact live CPA credential for legacy API auth index %q is not currently registered", staleAuthIndex)
 }
 
 func liveAPIEntryMatchesProviderV8(entry liveAuthEntryV8, provider string) bool {
