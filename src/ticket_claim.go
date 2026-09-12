@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"strings"
 	"time"
@@ -10,23 +12,37 @@ import (
 // failure, so scheduler ownership problems never open the candidate circuit.
 var errSchedulerTicketUnclaimed = errors.New("kcr scheduler did not claim execution ticket (routing control status 422); KCR is not the active CPA scheduler for this execution")
 
-// preserveClaimedTicketsV8 detaches already-claimed execution tickets from the
-// short pre-claim TTL. The TTL only protects tickets that never reach KCR's
-// scheduler. Once scheduler.pick has claimed a ticket, the owning executor must
-// keep it until finishExecutionTicket consumes it, even for long upstream calls.
+// issueExecutionTicketV8 creates a pin token whose lifetime is the enclosing
+// host.model.execute[_stream] attempt, not the short pre-claim ticket TTL.
 //
-// resolveAuthIDByIndex calls this immediately after claimTicket in the scheduler
-// path, before any upstream execution can block for a long time.
-func preserveClaimedTicketsV8() {
-	runtimeState.Lock()
-	defer runtimeState.Unlock()
-	for token, rec := range runtimeState.tickets {
-		if !rec.Claimed {
-			continue
+// This mirrors the lifecycle used by existing CPA pinning plugins: register a
+// token before the nested host execution, let scheduler.pick mark it claimed,
+// then atomically consume it when that host execution returns. Active execution
+// tokens therefore cannot disappear because an unrelated request runs ticket
+// cleanup while a long non-stream response is still in flight.
+func issueExecutionTicketV8(authIndex, provider string) string {
+	for attempt := 0; attempt < 4; attempt++ {
+		var raw [18]byte
+		if _, err := rand.Read(raw[:]); err != nil {
+			return ""
 		}
-		rec.ExpiresAt = time.Date(9999, time.December, 31, 23, 59, 59, 0, time.UTC)
-		runtimeState.tickets[token] = rec
+		tok := hex.EncodeToString(raw[:])
+		runtimeState.Lock()
+		if runtimeState.tickets == nil {
+			runtimeState.tickets = map[string]ticketRecord{}
+		}
+		if _, exists := runtimeState.tickets[tok]; !exists {
+			runtimeState.tickets[tok] = ticketRecord{
+				AuthIndex: authIndex,
+				Provider:  provider,
+				ExpiresAt: time.Date(9999, time.December, 31, 23, 59, 59, 0, time.UTC),
+			}
+			runtimeState.Unlock()
+			return tok
+		}
+		runtimeState.Unlock()
 	}
+	return ""
 }
 
 // finishExecutionTicket consumes one execution ticket and reports whether KCR's
