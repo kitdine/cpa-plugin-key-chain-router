@@ -47,7 +47,7 @@ func runNonStreamPolicyV4(trace string, p *Policy, r *PolicyRule, ranked []*Poli
 		} else {
 			lastErr = fmt.Errorf("upstream status %d", resp.StatusCode)
 		}
-		recordCandidateFailureV4(p, r, c, ar.Status, err, resp.Headers, probe)
+		recordCandidateExecutionFailureV8(p, r, c, ar.Status, err, resp.Headers, probe)
 		action := failureActionV4(r.Failover, ar.Status, err)
 		if action == failCPADefault {
 			return executeCPADefaultV4(event, source, clientModel, body, headers, query, alt, callbackID, started)
@@ -121,22 +121,36 @@ func executeCandidateV4(c *PolicyCandidate, source, clientModel string, body []b
 	if model == "" {
 		model = clientModel
 	}
+	started := time.Now()
 	h := cloneHeader(headers)
 	h.Del(ticketHeader)
 	ticket := ""
+	var err error
 	if c.AuthIndex != "" {
-		ticket = issueTicket(c.AuthIndex, c.Provider)
-		h.Set(ticketHeader, ticket)
+		ticket = issueExecutionTicketV8(c.AuthIndex, c.Provider)
+		if ticket == "" {
+			err = errSchedulerTicketIssue
+		} else {
+			h.Set(ticketHeader, ticket)
+		}
 	}
-	started := time.Now()
 	method := methodHostModelExecute
 	if stream {
 		method = methodHostModelExecuteStream
 	}
-	raw, err := callHost(method, map[string]any{"entry_protocol": source, "exit_protocol": source, "model": model, "stream": stream, "body": rewriteBodyModel(body, model), "headers": h, "query": query, "alt": alt, "host_callback_id": callbackID})
-	revokeTicket(ticket)
+	var raw json.RawMessage
+	if err == nil {
+		raw, err = callHost(method, map[string]any{"entry_protocol": source, "exit_protocol": source, "model": model, "stream": stream, "body": rewriteBodyModel(body, model), "headers": h, "query": query, "alt": alt, "host_callback_id": callbackID})
+	}
+	claimed := finishExecutionTicket(ticket)
 	ar := attemptResult{Candidate: c.Name, Provider: c.Provider, AuthIndex: c.AuthIndex, Model: model, Duration: time.Since(started)}
 	ar.DurationMs = ar.Duration.Milliseconds()
+	if ticket != "" && !claimed {
+		// Ownership is more fundamental than the nested host result. If KCR never
+		// selected this credential, a network/401/429/5xx from some other route
+		// must not be attributed to this candidate or affect its health state.
+		err = errSchedulerTicketUnclaimed
+	}
 	if err != nil {
 		ar.Error = err.Error()
 		ar.Status = statusFromError(err)
@@ -187,6 +201,13 @@ func executeCPADefaultV4(event RoutingEvent, source, clientModel string, body []
 }
 
 func failureActionV4(f FailoverPolicy, status int, err error) string {
+	// Losing scheduler ownership is global to the nested execution, not a
+	// candidate-specific upstream failure. Another scheduler may already have
+	// executed the request, so retrying a second KCR candidate can duplicate
+	// upstream traffic/cost and still cannot be attributed reliably to KCR.
+	if err == errSchedulerTicketUnclaimed || err == errSchedulerTicketIssue {
+		return failStop
+	}
 	f = normalizeFailover(f)
 	if status == 0 && err != nil {
 		return f.Network
@@ -244,21 +265,38 @@ func runStreamPolicyV4(trace string, p *Policy, r *PolicyRule, ranked []*PolicyC
 		h := cloneHeader(headers)
 		h.Del(ticketHeader)
 		ticket := ""
+		var err error
 		if c.AuthIndex != "" {
-			ticket = issueTicket(c.AuthIndex, c.Provider)
-			h.Set(ticketHeader, ticket)
+			ticket = issueExecutionTicketV8(c.AuthIndex, c.Provider)
+			if ticket == "" {
+				err = errSchedulerTicketIssue
+			} else {
+				h.Set(ticketHeader, ticket)
+			}
 		}
 		t := time.Now()
-		raw, err := callHost(methodHostModelExecuteStream, map[string]any{"entry_protocol": source, "exit_protocol": source, "model": model, "stream": true, "body": rewriteBodyModel(body, model), "headers": h, "query": query, "alt": alt, "host_callback_id": callbackID})
-		revokeTicket(ticket)
+		var raw json.RawMessage
+		if err == nil {
+			raw, err = callHost(methodHostModelExecuteStream, map[string]any{"entry_protocol": source, "exit_protocol": source, "model": model, "stream": true, "body": rewriteBodyModel(body, model), "headers": h, "query": query, "alt": alt, "host_callback_id": callbackID})
+		}
+		claimed := finishExecutionTicket(ticket)
 		ar := attemptResult{Candidate: c.Name, Provider: c.Provider, AuthIndex: c.AuthIndex, Model: model, Duration: time.Since(t)}
 		ar.DurationMs = ar.Duration.Milliseconds()
+		if ticket != "" && !claimed {
+			// A host success can already contain a stream handle. Close it before
+			// rejecting the unowned attempt so another scheduler cannot leak work.
+			var leaked hostModelStreamResponse
+			if len(raw) > 0 && json.Unmarshal(raw, &leaked) == nil && leaked.StreamID != "" {
+				_ = closeHostStream(leaked.StreamID)
+			}
+			err = errSchedulerTicketUnclaimed
+		}
 		if err != nil {
 			ar.Error = err.Error()
 			ar.Status = statusFromError(err)
 			event.Attempts = append(event.Attempts, ar)
 			lastErr = err
-			recordCandidateFailureV4(p, r, c, ar.Status, err, nil, probe)
+			recordCandidateExecutionFailureV8(p, r, c, ar.Status, err, nil, probe)
 			clearProbeOwnershipV4(&activeProbe)
 			action := failureActionV4(r.Failover, ar.Status, err)
 			if action == failCPADefault {
@@ -276,7 +314,7 @@ func runStreamPolicyV4(trace string, p *Policy, r *PolicyRule, ranked []*PolicyC
 			ar.Error = err.Error()
 			event.Attempts = append(event.Attempts, ar)
 			lastErr = err
-			recordCandidateFailureV4(p, r, c, 0, err, nil, probe)
+			recordCandidateExecutionFailureV8(p, r, c, 0, err, nil, probe)
 			clearProbeOwnershipV4(&activeProbe)
 			action := failureActionV4(r.Failover, 0, err)
 			if action == failCPADefault {
@@ -297,7 +335,7 @@ func runStreamPolicyV4(trace string, p *Policy, r *PolicyRule, ranked []*PolicyC
 			}
 			lastErr = fmt.Errorf("upstream status %d", sr.StatusCode)
 			event.Attempts[len(event.Attempts)-1].Error = lastErr.Error()
-			recordCandidateFailureV4(p, r, c, sr.StatusCode, nil, sr.Headers, probe)
+			recordCandidateExecutionFailureV8(p, r, c, sr.StatusCode, nil, sr.Headers, probe)
 			clearProbeOwnershipV4(&activeProbe)
 			action := failureActionV4(r.Failover, sr.StatusCode, nil)
 			if action == failCPADefault {
@@ -313,7 +351,7 @@ func runStreamPolicyV4(trace string, p *Policy, r *PolicyRule, ranked []*PolicyC
 		if sr.StreamID == "" {
 			lastErr = errors.New("host stream id 为空")
 			event.Attempts[len(event.Attempts)-1].Error = lastErr.Error()
-			recordCandidateFailureV4(p, r, c, 0, lastErr, sr.Headers, probe)
+			recordCandidateExecutionFailureV8(p, r, c, 0, lastErr, sr.Headers, probe)
 			clearProbeOwnershipV4(&activeProbe)
 			action := failureActionV4(r.Failover, 0, lastErr)
 			if action == failCPADefault {
@@ -333,7 +371,7 @@ func runStreamPolicyV4(trace string, p *Policy, r *PolicyRule, ranked []*PolicyC
 			if e != nil {
 				_ = closeHostStream(sr.StreamID)
 				lastErr = e
-				recordCandidateFailureV4(p, r, c, statusFromError(e), e, sr.Headers, probe)
+				recordCandidateExecutionFailureV8(p, r, c, statusFromError(e), e, sr.Headers, probe)
 				clearProbeOwnershipV4(&activeProbe)
 				if first {
 					event.Attempts[len(event.Attempts)-1].Error = e.Error()
@@ -361,7 +399,7 @@ func runStreamPolicyV4(trace string, p *Policy, r *PolicyRule, ranked []*PolicyC
 				_ = closeHostStream(sr.StreamID)
 				lastErr = errors.New(rr.Error)
 				streamStatus := statusFromError(lastErr)
-				recordCandidateFailureV4(p, r, c, streamStatus, lastErr, sr.Headers, probe)
+				recordCandidateExecutionFailureV8(p, r, c, streamStatus, lastErr, sr.Headers, probe)
 				clearProbeOwnershipV4(&activeProbe)
 				if first {
 					event.Attempts[len(event.Attempts)-1].Error = rr.Error

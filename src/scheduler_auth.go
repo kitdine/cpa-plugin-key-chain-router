@@ -6,29 +6,47 @@ import (
 	"strings"
 )
 
-// resolveAuthIDByIndex resolves the runtime AuthID from CPA's authoritative
-// host.auth.list data. AuthIndex is persisted by KCR because AuthID may change
-// across host reloads/upgrades and must not be inferred from scheduler candidates.
+// resolveAuthIDByIndex resolves the exact runtime AuthID KCR expects CPA to
+// select. OAuth/file credentials are authoritative in host.auth.list. Config
+// API-key credentials are different: current CPA keeps them as in-memory
+// AuthManager records that are not necessarily exposed by host.auth.list, so a
+// legacy KCR synthetic AuthIndex is bridged by reconstructing CPA's exact
+// current StableID from config.yaml. The caller must still require that returned
+// AuthID to exist in the live SchedulerPickRequest.Candidates set.
 func resolveAuthIDByIndex(authIndex, provider string) (string, error) {
 	authIndex = strings.TrimSpace(authIndex)
+	provider = strings.TrimSpace(provider)
 	if authIndex == "" {
 		return "", fmt.Errorf("auth index is empty")
 	}
 
+	var hostErr error
 	raw, err := callHost(methodHostAuthList, map[string]any{})
 	if err != nil {
-		return "", fmt.Errorf("host.auth.list: %w", err)
-	}
-	var resp hostAuthListResponse
-	if err := json.Unmarshal(raw, &resp); err != nil {
-		return "", fmt.Errorf("decode host.auth.list: %w", err)
+		hostErr = fmt.Errorf("host.auth.list: %w", err)
+	} else {
+		var resp hostAuthListResponse
+		if err := json.Unmarshal(raw, &resp); err != nil {
+			hostErr = fmt.Errorf("decode host.auth.list: %w", err)
+		} else if id := authIDFromEntries(resp.Files, authIndex, provider); id != "" {
+			return id, nil
+		}
 	}
 
-	id := authIDFromEntries(resp.Files, authIndex, provider)
-	if id == "" {
-		return "", fmt.Errorf("auth index %q not found in host.auth.list", authIndex)
+	// KCR <= v0.6.7 synthesized API-provider AuthIndex values from config.yaml.
+	// Reconstruct the exact current CPA Auth.ID here; handleSchedulerPick then
+	// proves that ID is live and selectable by matching it against req.Candidates.
+	legacyID, reconcileErr := resolveLegacySyntheticAuthIDV8(authIndex, provider)
+	if reconcileErr != nil {
+		return "", reconcileErr
 	}
-	return id, nil
+	if legacyID != "" {
+		return legacyID, nil
+	}
+	if hostErr != nil {
+		return "", hostErr
+	}
+	return "", fmt.Errorf("auth index %q is neither a host auth file nor a reconcilable config API credential", authIndex)
 }
 
 func authIDFromEntries(entries []hostAuthEntry, authIndex, provider string) string {
@@ -38,30 +56,16 @@ func authIDFromEntries(entries []hostAuthEntry, authIndex, provider string) stri
 		return ""
 	}
 
-	matches := make([]hostAuthEntry, 0, 1)
+	matchedID := ""
 	for _, entry := range entries {
 		if strings.TrimSpace(entry.AuthIndex) != authIndex || strings.TrimSpace(entry.ID) == "" {
 			continue
 		}
-		matches = append(matches, entry)
-	}
-	if len(matches) == 0 {
-		return ""
-	}
-	if len(matches) == 1 {
-		return strings.TrimSpace(matches[0].ID)
-	}
-
-	// AuthIndex should normally be unique. If a host returns duplicates, use
-	// provider/type only as a disambiguator and fail closed unless that leaves
-	// exactly one unique AuthID.
-	matchedID := ""
-	for _, entry := range matches {
 		entryProvider := strings.TrimSpace(entry.Provider)
 		if entryProvider == "" {
 			entryProvider = strings.TrimSpace(entry.Type)
 		}
-		if provider == "" || !strings.EqualFold(entryProvider, provider) {
+		if provider != "" && !strings.EqualFold(entryProvider, provider) {
 			continue
 		}
 		id := strings.TrimSpace(entry.ID)
@@ -89,15 +93,24 @@ func schedulerCandidateEligible(candidates []any, authID, authIndex, provider st
 		if id == "" {
 			id = stringAny(m, "id")
 		}
-		idx := stringAny(m, "AuthIndex")
-		if idx == "" {
-			idx = stringAny(m, "auth_index")
+
+		// Current CPA SchedulerAuthCandidate exposes the authoritative live Auth.ID
+		// but not AuthIndex. Once an AuthID has been resolved, only exact ID
+		// membership proves that this is the credential KCR intended to pin.
+		if authID != "" {
+			if strings.TrimSpace(id) != authID {
+				continue
+			}
+		} else {
+			idx := stringAny(m, "AuthIndex")
+			if idx == "" {
+				idx = stringAny(m, "auth_index")
+			}
+			if authIndex == "" || strings.TrimSpace(idx) != authIndex {
+				continue
+			}
 		}
-		idMatch := authID != "" && strings.TrimSpace(id) == authID
-		indexMatch := authIndex != "" && strings.TrimSpace(idx) == authIndex
-		if !idMatch && !indexMatch {
-			continue
-		}
+
 		candidateProvider := stringAny(m, "Provider")
 		if candidateProvider == "" {
 			candidateProvider = stringAny(m, "provider")
