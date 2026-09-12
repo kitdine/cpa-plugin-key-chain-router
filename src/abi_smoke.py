@@ -32,6 +32,7 @@ logs=[]
 scheduler_second_pick_blocked=False
 scheduler_first_pick_count=0
 skip_scheduler_claim_once=False
+unclaimed_host_error_once=False
 
 def env_ok(result):
     return json.dumps({'ok':True,'result':result},separators=(',',':')).encode()
@@ -57,7 +58,7 @@ def claim_nested_ticket(ticket, model):
 
 @HOSTCALL
 def host_call(ctx, method, req, n, out):
-    global captured_ticket, captured_model, output_closed, upread, scheduler_second_pick_blocked, scheduler_first_pick_count, skip_scheduler_claim_once
+    global captured_ticket, captured_model, output_closed, upread, scheduler_second_pick_blocked, scheduler_first_pick_count, skip_scheduler_claim_once, unclaimed_host_error_once
     m=method.decode()
     raw=bytes((c_uint8*n).from_address(addressof(req.contents))) if req and n else b'{}'
     payload=json.loads(raw or b'{}')
@@ -95,6 +96,9 @@ def host_call(ctx, method, req, n, out):
         if isinstance(vals,str): vals=[vals]
         captured_ticket=vals[0] if vals else None
         captured_model=payload.get('model')
+        if captured_ticket and unclaimed_host_error_once:
+            unclaimed_host_error_once=False
+            return_bytes(out, json.dumps({'ok':False,'error':{'code':'upstream_failure','message':'simulated upstream 503'}}).encode()); return 1
         if captured_ticket and skip_scheduler_claim_once:
             skip_scheduler_claim_once=False
         elif captured_ticket:
@@ -190,6 +194,17 @@ with tempfile.TemporaryDirectory() as td:
     else:
         raise AssertionError('unclaimed scheduler ticket must fail closed')
 
+    # The same ownership rule must override a host-side error. Otherwise an
+    # error produced by another scheduler would be attributed to the KCR
+    # candidate and could poison its health/cooldown state.
+    unclaimed_host_error_once=True
+    try:
+        pcall('executor.execute',{'Model':'gpt-anything','SourceFormat':'openai-response','Headers':{'Authorization':['Bearer '+key]},'OriginalRequest':base64.b64encode(b'{"model":"gpt-anything","input":"unclaimed-error"}').decode(),'Payload':base64.b64encode(b'{"model":"gpt-anything","input":"unclaimed-error"}').decode(),'Query':{},'Metadata':{},'host_callback_id':'cb-unclaimed-error'})
+    except RuntimeError as exc:
+        assert 'scheduler did not claim execution ticket' in str(exc), exc
+    else:
+        raise AssertionError('unclaimed host error must be classified as routing ownership failure')
+
     diag=pcall('management.handle',{'Method':'GET','Path':'/v0/resource/plugins/key-chain-router/api','Query':{'action':['diagnose'],'fingerprint':[fp],'model':['gpt-anything']},'Headers':{},'Body':''})
     diagbody=json.loads(base64.b64decode(diag['Body']))
     assert diagbody['matched'] is True
@@ -203,6 +218,9 @@ with tempfile.TemporaryDirectory() as td:
     assert ev['decision']=='KCR_HANDLED' and ev['success'] is False, ev
     assert 'scheduler did not claim execution ticket' in ev.get('error',''), ev
     assert ev['attempts'][0]['model']=='gpt-anything'
+    health=snapbody.get('candidate_health') or []
+    assert health and health[0]['state']=='closed', health
+    assert health[0].get('consecutive_failures',0)==0, health
     assert any(x.get('message')=='kcr routing decision' for x in logs), logs
 
     emitted.clear(); output_closed=False; upread=0
