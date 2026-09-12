@@ -125,7 +125,7 @@ func executeCandidateV4(c *PolicyCandidate, source, clientModel string, body []b
 	h.Del(ticketHeader)
 	ticket := ""
 	if c.AuthIndex != "" {
-		ticket = issueTicket(c.AuthIndex, c.Provider)
+		ticket = issueExecutionTicketV8(c.AuthIndex, c.Provider)
 		h.Set(ticketHeader, ticket)
 	}
 	started := time.Now()
@@ -248,7 +248,7 @@ func runStreamPolicyV4(trace string, p *Policy, r *PolicyRule, ranked []*PolicyC
 		h.Del(ticketHeader)
 		ticket := ""
 		if c.AuthIndex != "" {
-			ticket = issueTicket(c.AuthIndex, c.Provider)
+			ticket = issueExecutionTicketV8(c.AuthIndex, c.Provider)
 			h.Set(ticketHeader, ticket)
 		}
 		t := time.Now()
