@@ -47,7 +47,7 @@ func runNonStreamPolicyV4(trace string, p *Policy, r *PolicyRule, ranked []*Poli
 		} else {
 			lastErr = fmt.Errorf("upstream status %d", resp.StatusCode)
 		}
-		recordCandidateFailureV4(p, r, c, ar.Status, err, resp.Headers, probe)
+		recordCandidateExecutionFailureV8(p, r, c, ar.Status, err, resp.Headers, probe)
 		action := failureActionV4(r.Failover, ar.Status, err)
 		if action == failCPADefault {
 			return executeCPADefaultV4(event, source, clientModel, body, headers, query, alt, callbackID, started)
@@ -289,7 +289,7 @@ func runStreamPolicyV4(trace string, p *Policy, r *PolicyRule, ranked []*PolicyC
 			ar.Status = statusFromError(err)
 			event.Attempts = append(event.Attempts, ar)
 			lastErr = err
-			recordCandidateFailureV4(p, r, c, ar.Status, err, nil, probe)
+			recordCandidateExecutionFailureV8(p, r, c, ar.Status, err, nil, probe)
 			clearProbeOwnershipV4(&activeProbe)
 			action := failureActionV4(r.Failover, ar.Status, err)
 			if action == failCPADefault {
@@ -307,7 +307,7 @@ func runStreamPolicyV4(trace string, p *Policy, r *PolicyRule, ranked []*PolicyC
 			ar.Error = err.Error()
 			event.Attempts = append(event.Attempts, ar)
 			lastErr = err
-			recordCandidateFailureV4(p, r, c, 0, err, nil, probe)
+			recordCandidateExecutionFailureV8(p, r, c, 0, err, nil, probe)
 			clearProbeOwnershipV4(&activeProbe)
 			action := failureActionV4(r.Failover, 0, err)
 			if action == failCPADefault {
@@ -328,7 +328,7 @@ func runStreamPolicyV4(trace string, p *Policy, r *PolicyRule, ranked []*PolicyC
 			}
 			lastErr = fmt.Errorf("upstream status %d", sr.StatusCode)
 			event.Attempts[len(event.Attempts)-1].Error = lastErr.Error()
-			recordCandidateFailureV4(p, r, c, sr.StatusCode, nil, sr.Headers, probe)
+			recordCandidateExecutionFailureV8(p, r, c, sr.StatusCode, nil, sr.Headers, probe)
 			clearProbeOwnershipV4(&activeProbe)
 			action := failureActionV4(r.Failover, sr.StatusCode, nil)
 			if action == failCPADefault {
@@ -344,7 +344,7 @@ func runStreamPolicyV4(trace string, p *Policy, r *PolicyRule, ranked []*PolicyC
 		if sr.StreamID == "" {
 			lastErr = errors.New("host stream id 为空")
 			event.Attempts[len(event.Attempts)-1].Error = lastErr.Error()
-			recordCandidateFailureV4(p, r, c, 0, lastErr, sr.Headers, probe)
+			recordCandidateExecutionFailureV8(p, r, c, 0, lastErr, sr.Headers, probe)
 			clearProbeOwnershipV4(&activeProbe)
 			action := failureActionV4(r.Failover, 0, lastErr)
 			if action == failCPADefault {
@@ -364,7 +364,7 @@ func runStreamPolicyV4(trace string, p *Policy, r *PolicyRule, ranked []*PolicyC
 			if e != nil {
 				_ = closeHostStream(sr.StreamID)
 				lastErr = e
-				recordCandidateFailureV4(p, r, c, statusFromError(e), e, sr.Headers, probe)
+				recordCandidateExecutionFailureV8(p, r, c, statusFromError(e), e, sr.Headers, probe)
 				clearProbeOwnershipV4(&activeProbe)
 				if first {
 					event.Attempts[len(event.Attempts)-1].Error = e.Error()
@@ -392,7 +392,7 @@ func runStreamPolicyV4(trace string, p *Policy, r *PolicyRule, ranked []*PolicyC
 				_ = closeHostStream(sr.StreamID)
 				lastErr = errors.New(rr.Error)
 				streamStatus := statusFromError(lastErr)
-				recordCandidateFailureV4(p, r, c, streamStatus, lastErr, sr.Headers, probe)
+				recordCandidateExecutionFailureV8(p, r, c, streamStatus, lastErr, sr.Headers, probe)
 				clearProbeOwnershipV4(&activeProbe)
 				if first {
 					event.Attempts[len(event.Attempts)-1].Error = rr.Error
