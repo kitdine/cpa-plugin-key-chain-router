@@ -121,23 +121,34 @@ func executeCandidateV4(c *PolicyCandidate, source, clientModel string, body []b
 	if model == "" {
 		model = clientModel
 	}
+	started := time.Now()
 	h := cloneHeader(headers)
 	h.Del(ticketHeader)
 	ticket := ""
+	var err error
 	if c.AuthIndex != "" {
 		ticket = issueExecutionTicketV8(c.AuthIndex, c.Provider)
-		h.Set(ticketHeader, ticket)
+		if ticket == "" {
+			err = errSchedulerTicketIssue
+		} else {
+			h.Set(ticketHeader, ticket)
+		}
 	}
-	started := time.Now()
 	method := methodHostModelExecute
 	if stream {
 		method = methodHostModelExecuteStream
 	}
-	raw, err := callHost(method, map[string]any{"entry_protocol": source, "exit_protocol": source, "model": model, "stream": stream, "body": rewriteBodyModel(body, model), "headers": h, "query": query, "alt": alt, "host_callback_id": callbackID})
+	var raw json.RawMessage
+	if err == nil {
+		raw, err = callHost(method, map[string]any{"entry_protocol": source, "exit_protocol": source, "model": model, "stream": stream, "body": rewriteBodyModel(body, model), "headers": h, "query": query, "alt": alt, "host_callback_id": callbackID})
+	}
 	claimed := finishExecutionTicket(ticket)
 	ar := attemptResult{Candidate: c.Name, Provider: c.Provider, AuthIndex: c.AuthIndex, Model: model, Duration: time.Since(started)}
 	ar.DurationMs = ar.Duration.Milliseconds()
-	if err == nil && ticket != "" && !claimed {
+	if ticket != "" && !claimed {
+		// Ownership is more fundamental than the nested host result. If KCR never
+		// selected this credential, a network/401/429/5xx from some other route
+		// must not be attributed to this candidate or affect its health state.
 		err = errSchedulerTicketUnclaimed
 	}
 	if err != nil {
@@ -247,18 +258,28 @@ func runStreamPolicyV4(trace string, p *Policy, r *PolicyRule, ranked []*PolicyC
 		h := cloneHeader(headers)
 		h.Del(ticketHeader)
 		ticket := ""
+		var err error
 		if c.AuthIndex != "" {
 			ticket = issueExecutionTicketV8(c.AuthIndex, c.Provider)
-			h.Set(ticketHeader, ticket)
+			if ticket == "" {
+				err = errSchedulerTicketIssue
+			} else {
+				h.Set(ticketHeader, ticket)
+			}
 		}
 		t := time.Now()
-		raw, err := callHost(methodHostModelExecuteStream, map[string]any{"entry_protocol": source, "exit_protocol": source, "model": model, "stream": true, "body": rewriteBodyModel(body, model), "headers": h, "query": query, "alt": alt, "host_callback_id": callbackID})
+		var raw json.RawMessage
+		if err == nil {
+			raw, err = callHost(methodHostModelExecuteStream, map[string]any{"entry_protocol": source, "exit_protocol": source, "model": model, "stream": true, "body": rewriteBodyModel(body, model), "headers": h, "query": query, "alt": alt, "host_callback_id": callbackID})
+		}
 		claimed := finishExecutionTicket(ticket)
 		ar := attemptResult{Candidate: c.Name, Provider: c.Provider, AuthIndex: c.AuthIndex, Model: model, Duration: time.Since(t)}
 		ar.DurationMs = ar.Duration.Milliseconds()
-		if err == nil && ticket != "" && !claimed {
+		if ticket != "" && !claimed {
+			// A host success can already contain a stream handle. Close it before
+			// rejecting the unowned attempt so another scheduler cannot leak work.
 			var leaked hostModelStreamResponse
-			if json.Unmarshal(raw, &leaked) == nil && leaked.StreamID != "" {
+			if len(raw) > 0 && json.Unmarshal(raw, &leaked) == nil && leaked.StreamID != "" {
 				_ = closeHostStream(leaked.StreamID)
 			}
 			err = errSchedulerTicketUnclaimed
