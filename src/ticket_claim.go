@@ -3,11 +3,31 @@ package main
 import (
 	"errors"
 	"strings"
+	"time"
 )
 
 // 422 is intentional: statusFromError classifies this as a local, non-health
 // failure, so scheduler ownership problems never open the candidate circuit.
 var errSchedulerTicketUnclaimed = errors.New("kcr scheduler did not claim execution ticket (routing control status 422); KCR is not the active CPA scheduler for this execution")
+
+// preserveClaimedTicketsV8 detaches already-claimed execution tickets from the
+// short pre-claim TTL. The TTL only protects tickets that never reach KCR's
+// scheduler. Once scheduler.pick has claimed a ticket, the owning executor must
+// keep it until finishExecutionTicket consumes it, even for long upstream calls.
+//
+// resolveAuthIDByIndex calls this immediately after claimTicket in the scheduler
+// path, before any upstream execution can block for a long time.
+func preserveClaimedTicketsV8() {
+	runtimeState.Lock()
+	defer runtimeState.Unlock()
+	for token, rec := range runtimeState.tickets {
+		if !rec.Claimed {
+			continue
+		}
+		rec.ExpiresAt = time.Date(9999, time.December, 31, 23, 59, 59, 0, time.UTC)
+		runtimeState.tickets[token] = rec
+	}
+}
 
 // finishExecutionTicket consumes one execution ticket and reports whether KCR's
 // scheduler actually claimed it. A successful host.model.execute result is not
