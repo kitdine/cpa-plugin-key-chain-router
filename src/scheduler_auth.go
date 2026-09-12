@@ -15,6 +15,11 @@ func resolveAuthIDByIndex(authIndex, provider string) (string, error) {
 		return "", fmt.Errorf("auth index is empty")
 	}
 
+	// This function is entered immediately after claimTicket in scheduler.pick.
+	// Claimed tickets now belong to an active executor and must survive the short
+	// pre-claim TTL until finishExecutionTicket consumes them.
+	preserveClaimedTicketsV8()
+
 	raw, err := callHost(methodHostAuthList, map[string]any{})
 	if err != nil {
 		return "", fmt.Errorf("host.auth.list: %w", err)
