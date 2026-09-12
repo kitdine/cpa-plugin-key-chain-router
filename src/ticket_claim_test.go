@@ -23,7 +23,10 @@ func withTicketRuntimeForTest(t *testing.T) {
 
 func TestFinishExecutionTicketRequiresClaim(t *testing.T) {
 	withTicketRuntimeForTest(t)
-	tok := issueTicket("idx-a", "codex")
+	tok := issueExecutionTicketV8("idx-a", "codex")
+	if tok == "" {
+		t.Fatal("failed to issue execution ticket")
+	}
 	if finishExecutionTicket(tok) {
 		t.Fatal("unclaimed execution ticket must fail closed")
 	}
@@ -34,7 +37,10 @@ func TestFinishExecutionTicketRequiresClaim(t *testing.T) {
 
 func TestFinishExecutionTicketAcceptsClaimedTicket(t *testing.T) {
 	withTicketRuntimeForTest(t)
-	tok := issueTicket("idx-a", "codex")
+	tok := issueExecutionTicketV8("idx-a", "codex")
+	if tok == "" {
+		t.Fatal("failed to issue execution ticket")
+	}
 	rec, ok, first := claimTicket(tok)
 	if !ok || !first || rec.AuthIndex != "idx-a" {
 		t.Fatalf("claimTicket() = (%#v, %v, %v)", rec, ok, first)
@@ -47,25 +53,27 @@ func TestFinishExecutionTicketAcceptsClaimedTicket(t *testing.T) {
 	}
 }
 
-func TestClaimedExecutionTicketSurvivesPreClaimTTL(t *testing.T) {
+func TestExecutionTicketSurvivesConfiguredPreClaimTTL(t *testing.T) {
 	withTicketRuntimeForTest(t)
 	runtimeState.Lock()
 	runtimeState.cfg.TicketTTL = 5 * time.Millisecond
 	runtimeState.Unlock()
 
-	tok := issueTicket("idx-a", "codex")
-	if _, ok, first := claimTicket(tok); !ok || !first {
-		t.Fatalf("claimTicket()=(ok=%v, first=%v), want claimed", ok, first)
+	tok := issueExecutionTicketV8("idx-a", "codex")
+	if tok == "" {
+		t.Fatal("failed to issue execution ticket")
 	}
-	preserveClaimedTicketsV8()
 	time.Sleep(10 * time.Millisecond)
 
-	// issueTicket triggers cleanupTicketsLocked. An active claimed ticket must
-	// survive that cleanup until its executor finalizes it.
+	// Legacy issueTicket still triggers cleanupTicketsLocked. An active execution
+	// token is attempt-scoped and must survive that unrelated pre-claim cleanup.
 	other := issueTicket("idx-b", "codex")
 	defer revokeTicket(other)
+	if _, ok, first := claimTicket(tok); !ok || !first {
+		t.Fatalf("claimTicket() after configured TTL = (ok=%v, first=%v), want claimed", ok, first)
+	}
 	if !finishExecutionTicket(tok) {
-		t.Fatal("claimed ticket was removed by pre-claim TTL cleanup")
+		t.Fatal("active execution ticket was removed by pre-claim TTL cleanup")
 	}
 }
 
