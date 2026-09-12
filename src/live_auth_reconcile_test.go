@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -26,7 +25,7 @@ func withCPAConfigPathForTest(t *testing.T, content string) string {
 	return path
 }
 
-func TestLegacySyntheticAPIAuthIndexResolvesOnlyExactLiveCredential(t *testing.T) {
+func TestLegacySyntheticAPIAuthIndexResolvesExactCurrentStableID(t *testing.T) {
 	config := "codex-api-key:\n  - api-key: sk-up\n    base-url: https://up.example/v1\n    prefix: plus\n"
 	withCPAConfigPathForTest(t, config)
 	_, resources := parseCPAConfig(config)
@@ -34,25 +33,17 @@ func TestLegacySyntheticAPIAuthIndexResolvesOnlyExactLiveCredential(t *testing.T
 		t.Fatalf("config resources = %#v", resources)
 	}
 	stale := resources[0].AuthIndex
-	exact := legacyCurrentRuntimeIDsV8(config, stale, "codex")
-	if len(exact) != 1 {
-		t.Fatalf("exact runtime IDs=%#v, want one", exact)
-	}
-
-	raw, _ := json.Marshal(liveAuthListResponseV8{Files: []liveAuthEntryV8{{
-		ID: exact[0], AuthIndex: "live-auth-index", Provider: "codex",
-		BaseURL: "https://up.example/v1/", RuntimeOnly: true,
-	}}})
-	id, idx, err := resolveLegacySyntheticAuthV8(raw, stale, "codex")
+	want := stableID("codex:apikey", "sk-up", "https://up.example/v1", "", "plus", "")
+	id, err := resolveLegacySyntheticAuthIDV8(stale, "codex")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if id != exact[0] || idx != "live-auth-index" {
-		t.Fatalf("resolved=(%q,%q), want exact live credential", id, idx)
+	if id != want {
+		t.Fatalf("resolved=%q, want exact CPA StableID %q", id, want)
 	}
 }
 
-func TestLegacySyntheticAPIAuthIndexUsesExactRuntimeIDForSameBaseURL(t *testing.T) {
+func TestLegacySyntheticAPIAuthIndexDistinguishesSameBaseURLKeys(t *testing.T) {
 	config := "codex-api-key:\n  - api-key: sk-one\n    base-url: https://up.example/v1\n    prefix: plus\n  - api-key: sk-two\n    base-url: https://up.example/v1\n    prefix: plus\n"
 	withCPAConfigPathForTest(t, config)
 	_, resources := parseCPAConfig(config)
@@ -60,20 +51,20 @@ func TestLegacySyntheticAPIAuthIndexUsesExactRuntimeIDForSameBaseURL(t *testing.
 		t.Fatalf("config resources=%#v", resources)
 	}
 	stale := resources[1].AuthIndex
-	exact := legacyCurrentRuntimeIDsV8(config, stale, "codex")
-	if len(exact) != 1 {
-		t.Fatalf("exact runtime IDs=%#v", exact)
-	}
-	raw, _ := json.Marshal(liveAuthListResponseV8{Files: []liveAuthEntryV8{
-		{ID: stableID("codex:apikey", "sk-one", "https://up.example/v1", "", "plus", ""), AuthIndex: "live-one", Provider: "codex", BaseURL: "https://up.example/v1", RuntimeOnly: true},
-		{ID: exact[0], AuthIndex: "live-two", Provider: "codex", BaseURL: "https://up.example/v1", RuntimeOnly: true},
-	}})
-	id, idx, err := resolveLegacySyntheticAuthV8(raw, stale, "codex")
+	want := stableID("codex:apikey", "sk-two", "https://up.example/v1", "", "plus", "")
+	id, err := resolveLegacySyntheticAuthIDV8(stale, "codex")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if id != exact[0] || idx != "live-two" {
-		t.Fatalf("resolved=(%q,%q), want exact second credential (%q,live-two)", id, idx, exact[0])
+	if id != want {
+		t.Fatalf("resolved=%q, want exact second credential %q", id, want)
+	}
+	candidates := []any{
+		map[string]any{"ID": stableID("codex:apikey", "sk-one", "https://up.example/v1", "", "plus", ""), "Provider": "codex"},
+		map[string]any{"ID": want, "Provider": "codex"},
+	}
+	if !schedulerCandidateEligible(candidates, id, stale, "codex") {
+		t.Fatal("exact second runtime ID must be selectable from live scheduler candidates")
 	}
 }
 
@@ -82,53 +73,40 @@ func TestLegacySyntheticAPIAuthIndexIncludesProxyPrefixAndHeaders(t *testing.T) 
 	withCPAConfigPathForTest(t, config)
 	_, resources := parseCPAConfig(config)
 	stale := resources[0].AuthIndex
-	ids := legacyCurrentRuntimeIDsV8(config, stale, "codex")
+	id, err := resolveLegacySyntheticAuthIDV8(stale, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
 	want := stableID("codex:apikey", "sk-up", "https://up.example/v1", "http://proxy.local:8080", "plus", "X-A\x00a\x00X-Z\x00z\x00")
-	if len(ids) != 1 || ids[0] != want {
-		t.Fatalf("runtime IDs=%#v, want %q", ids, want)
+	if id != want {
+		t.Fatalf("runtime ID=%q, want %q", id, want)
 	}
 }
 
-func TestLegacySyntheticAPIAuthIndexRefusesUnrelatedSameBaseURLCredential(t *testing.T) {
+func TestLegacySyntheticAPIAuthIDMustExistInLiveSchedulerCandidates(t *testing.T) {
 	config := "codex-api-key:\n  - api-key: sk-intended\n    base-url: https://up.example/v1\n"
 	withCPAConfigPathForTest(t, config)
 	_, resources := parseCPAConfig(config)
 	stale := resources[0].AuthIndex
-
-	// The intended current StableID is deliberately absent. A different API key
-	// happens to be the only live credential with the same provider/base URL.
-	unrelated := stableID("codex:apikey", "sk-other", "https://up.example/v1", "", "", "")
-	raw, _ := json.Marshal(liveAuthListResponseV8{Files: []liveAuthEntryV8{{
-		ID: unrelated, AuthIndex: "live-other", Provider: "codex",
-		BaseURL: "https://up.example/v1", RuntimeOnly: true,
-	}}})
-	id, idx, err := resolveLegacySyntheticAuthV8(raw, stale, "codex")
-	if err == nil {
-		t.Fatal("missing exact runtime identity must fail closed even with one same-base live credential")
+	intended, err := resolveLegacySyntheticAuthIDV8(stale, "codex")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if id != "" || idx != "" {
-		t.Fatalf("unrelated credential must not be returned: (%q,%q)", id, idx)
+	unrelated := stableID("codex:apikey", "sk-other", "https://up.example/v1", "", "", "")
+	candidates := []any{map[string]any{"ID": unrelated, "Provider": "codex"}}
+	if schedulerCandidateEligible(candidates, intended, stale, "codex") {
+		t.Fatal("same-provider live credential must not substitute for missing exact AuthID")
 	}
 }
 
-func TestLegacySyntheticAPIAuthIndexNeverMatchesOAuth(t *testing.T) {
-	config := "codex-api-key:\n  - api-key: sk-up\n    base-url: https://up.example/v1\n"
+func TestLegacySyntheticAPIAuthIndexRejectsAmbiguousOldIdentity(t *testing.T) {
+	config := "codex-api-key:\n  - api-key: sk-up\n    base-url: https://up.example/v1\n  - api-key: sk-up\n    base-url: https://up.example/v1\n"
 	withCPAConfigPathForTest(t, config)
 	_, resources := parseCPAConfig(config)
-	stale := resources[0].AuthIndex
-	exact := legacyCurrentRuntimeIDsV8(config, stale, "codex")
-	if len(exact) != 1 {
-		t.Fatalf("exact runtime IDs=%#v", exact)
+	if len(resources) != 2 || resources[0].AuthIndex != resources[1].AuthIndex {
+		t.Fatalf("expected duplicate legacy identity, got %#v", resources)
 	}
-	raw, _ := json.Marshal(liveAuthListResponseV8{Files: []liveAuthEntryV8{{
-		ID: exact[0], AuthIndex: "oauth-index", Provider: "codex",
-		BaseURL: "https://up.example/v1", RuntimeOnly: false,
-	}}})
-	id, idx, err := resolveLegacySyntheticAuthV8(raw, stale, "codex")
-	if err == nil {
-		t.Fatal("OAuth credential must not satisfy API reconciliation")
-	}
-	if id != "" || idx != "" {
-		t.Fatalf("OAuth credential must not be returned: (%q,%q)", id, idx)
+	if id, err := resolveLegacySyntheticAuthIDV8(resources[0].AuthIndex, "codex"); err == nil || id != "" {
+		t.Fatalf("ambiguous legacy identity must fail closed: id=%q err=%v", id, err)
 	}
 }
