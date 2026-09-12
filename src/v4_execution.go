@@ -84,6 +84,7 @@ func nextCandidateV4(ranked []*PolicyCandidate, attempted map[string]bool, actio
 			if !attempted[c.ID] && c.Priority == currentPriority {
 				return c
 			}
+		}
 		for _, c := range ranked {
 			if !attempted[c.ID] && c.Priority < currentPriority {
 				return c
