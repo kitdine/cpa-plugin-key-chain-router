@@ -58,3 +58,19 @@ func TestRealExecutionFailureStillUpdatesCandidateHealth(t *testing.T) {
 		t.Fatalf("real upstream failure did not update health: %#v", view)
 	}
 }
+
+func TestSchedulerOwnershipFailureAlwaysStopsEvenWhenOtherWouldRetry(t *testing.T) {
+	f := defaultFailover()
+	f.Other = failNext
+	if got := failureActionV4(f, 422, errSchedulerTicketUnclaimed); got != failStop {
+		t.Fatalf("unclaimed scheduler ticket action=%q, want stop", got)
+	}
+	if got := failureActionV4(f, 422, errSchedulerTicketIssue); got != failStop {
+		t.Fatalf("ticket issuance failure action=%q, want stop", got)
+	}
+
+	ordinary := errors.New("ordinary 422")
+	if got := failureActionV4(f, 422, ordinary); got != failNext {
+		t.Fatalf("ordinary 422 action=%q, want configured next", got)
+	}
+}
