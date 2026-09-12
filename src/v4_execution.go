@@ -84,7 +84,6 @@ func nextCandidateV4(ranked []*PolicyCandidate, attempted map[string]bool, actio
 			if !attempted[c.ID] && c.Priority == currentPriority {
 				return c
 			}
-		}
 		for _, c := range ranked {
 			if !attempted[c.ID] && c.Priority < currentPriority {
 				return c
@@ -201,6 +200,13 @@ func executeCPADefaultV4(event RoutingEvent, source, clientModel string, body []
 }
 
 func failureActionV4(f FailoverPolicy, status int, err error) string {
+	// Losing scheduler ownership is global to the nested execution, not a
+	// candidate-specific upstream failure. Another scheduler may already have
+	// executed the request, so retrying a second KCR candidate can duplicate
+	// upstream traffic/cost and still cannot be attributed reliably to KCR.
+	if err == errSchedulerTicketUnclaimed || err == errSchedulerTicketIssue {
+		return failStop
+	}
 	f = normalizeFailover(f)
 	if status == 0 && err != nil {
 		return f.Network
