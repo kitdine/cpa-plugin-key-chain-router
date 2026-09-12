@@ -74,3 +74,21 @@ func TestSchedulerOwnershipFailureAlwaysStopsEvenWhenOtherWouldRetry(t *testing.
 		t.Fatalf("ordinary 422 action=%q, want configured next", got)
 	}
 }
+
+func TestSchedulerOwnershipFailureSuppressesExhaustedCPADefault(t *testing.T) {
+	resetIssue13Health(t)
+	p, r, ranked := issue13Fixture()
+	a := ranked[0]
+	r.Failover.Exhausted = failCPADefault
+
+	recordCandidateExecutionFailureV8(p, r, a, 422, errSchedulerTicketUnclaimed, nil, false)
+	if r.Failover.Exhausted != failStop {
+		t.Fatalf("unclaimed scheduler ticket left exhausted action=%q, want stop", r.Failover.Exhausted)
+	}
+
+	r.Failover.Exhausted = failCPADefault
+	recordCandidateExecutionFailureV8(p, r, a, 422, errSchedulerTicketIssue, nil, false)
+	if r.Failover.Exhausted != failStop {
+		t.Fatalf("ticket issuance failure left exhausted action=%q, want stop", r.Failover.Exhausted)
+	}
+}
