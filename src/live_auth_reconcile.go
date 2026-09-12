@@ -146,8 +146,9 @@ func legacyCurrentRuntimeIDsV8(rawConfig, staleAuthIndex, provider string) []str
 }
 
 // topMapHeadersV8 extracts a simple `headers:` string map for each top-level
-// list item in a config section. It intentionally mirrors only the shape used by
-// CPA API-key credentials and leaves the general lightweight parser unchanged.
+// list item in a config section. It accepts both block-style maps and the
+// flow-style maps accepted by CPA, while leaving the general lightweight parser
+// unchanged.
 func topMapHeadersV8(lines []yamlLine, section string) []map[string]string {
 	start, end := sectionBounds(lines, section)
 	if start < 0 {
@@ -169,8 +170,14 @@ func topMapHeadersV8(lines []yamlLine, section string) []map[string]string {
 				continue
 			}
 			key, value, ok := splitYAMLKeyValue(lines[j].Text)
-			if !ok || !strings.EqualFold(strings.TrimSpace(key), "headers") || strings.TrimSpace(value) != "" {
+			if !ok || !strings.EqualFold(strings.TrimSpace(key), "headers") {
 				continue
+			}
+			if strings.TrimSpace(value) != "" {
+				for hk, hv := range parseFlowStringMapV8(value) {
+					headers[hk] = hv
+				}
+				break
 			}
 			for k := j + 1; k < itemEnd && lines[k].Indent > 4; k++ {
 				if lines[k].Indent != 6 {
@@ -192,6 +199,67 @@ func topMapHeadersV8(lines []yamlLine, section string) []map[string]string {
 		i = itemEnd
 	}
 	return out
+}
+
+// parseFlowStringMapV8 parses the small YAML flow-map subset used by CPA's
+// credential `headers` field. Commas and colons inside quoted scalars are kept
+// as data, so common header values such as `"a,b:c"` hash identically to their
+// block-style representation. Malformed entries are ignored rather than guessed.
+func parseFlowStringMapV8(raw string) map[string]string {
+	raw = strings.TrimSpace(raw)
+	out := map[string]string{}
+	if len(raw) < 2 || raw[0] != '{' || raw[len(raw)-1] != '}' {
+		return out
+	}
+	body := strings.TrimSpace(raw[1 : len(raw)-1])
+	if body == "" {
+		return out
+	}
+	for _, entry := range splitFlowYAMLTopLevelV8(body, ',') {
+		parts := splitFlowYAMLTopLevelV8(entry, ':')
+		if len(parts) < 2 {
+			continue
+		}
+		key := strings.TrimSpace(scalar(parts[0]))
+		value := strings.TrimSpace(scalar(strings.Join(parts[1:], ":")))
+		if key != "" && value != "" {
+			out[key] = value
+		}
+	}
+	return out
+}
+
+func splitFlowYAMLTopLevelV8(raw string, delimiter rune) []string {
+	parts := []string{}
+	start := 0
+	var quote rune
+	escaped := false
+	for i, r := range raw {
+		if escaped {
+			escaped = false
+			continue
+		}
+		if quote == '"' && r == '\\' {
+			escaped = true
+			continue
+		}
+		if quote != 0 {
+			if r == quote {
+				quote = 0
+			}
+			continue
+		}
+		if r == '\'' || r == '"' {
+			quote = r
+			continue
+		}
+		if r == delimiter {
+			parts = append(parts, raw[start:i])
+			start = i + len(string(r))
+		}
+	}
+	parts = append(parts, raw[start:])
+	return parts
 }
 
 func formatSortedHeadersV8(headers map[string]string) string {
