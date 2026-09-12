@@ -10,15 +10,19 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-func TestSchedulerCandidateEligibleRequiresMembership(t *testing.T) {
+func TestSchedulerCandidateEligibleRequiresExactRuntimeMembership(t *testing.T) {
 	candidates := []any{
 		map[string]any{"id": "wrong-candidate-id", "auth_index": "idx-a", "provider": "codex"},
 	}
+	if schedulerCandidateEligible(candidates, "runtime-auth-a", "idx-a", "codex") {
+		t.Fatal("stale AuthIndex must not substitute for missing exact runtime AuthID")
+	}
+	candidates = append(candidates, map[string]any{"id": "runtime-auth-a", "provider": "codex"})
 	if !schedulerCandidateEligible(candidates, "runtime-auth-a", "idx-a", "codex") {
-		t.Fatal("expected matching stable AuthIndex scheduler candidate to be eligible")
+		t.Fatal("exact runtime AuthID must be eligible")
 	}
 	if schedulerCandidateEligible(candidates, "runtime-auth-b", "idx-b", "codex") {
-		t.Fatal("candidate absent by both runtime AuthID and AuthIndex must be rejected")
+		t.Fatal("candidate absent by runtime AuthID must be rejected")
 	}
 	if schedulerCandidateEligible(candidates, "runtime-auth-a", "idx-a", "claude") {
 		t.Fatal("provider-mismatched scheduler candidate must be rejected")
