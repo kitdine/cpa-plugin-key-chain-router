@@ -10,6 +10,17 @@ if not VERSION:
         VERSION=name[len(prefix):-3]
 lib = ctypes.CDLL(SO)
 
+def stable_id(kind,*parts):
+    h=hashlib.sha256()
+    h.update(kind.encode())
+    for part in parts:
+        h.update(b'\0')
+        h.update(str(part).strip().encode())
+    return kind+':'+h.hexdigest()[:12]
+
+LEGACY_API_INDEX=hashlib.sha256(b'codex-api-key:https://up.example/v1+sk-up').hexdigest()[:16]
+LIVE_API_ID=stable_id('codex:apikey','sk-up','https://up.example/v1','','plus','')
+
 class Buffer(Structure):
     _fields_=[('ptr', c_void_p),('len', c_size_t)]
 HOSTCALL=CFUNCTYPE(c_int,c_void_p,c_char_p,POINTER(c_uint8),c_size_t,POINTER(Buffer))
@@ -45,9 +56,12 @@ def return_bytes(out,b):
 
 def claim_nested_ticket(ticket, model):
     global scheduler_second_pick_blocked, scheduler_first_pick_count
-    req={'Provider':'codex','Model':model,'Options':{'Headers':{'X-CPA-Key-Chain-Ticket':[ticket]}},'Candidates':[{'ID':'wrong-candidate-id','Provider':'codex','AuthIndex':'9b725f538a48ad68'}]}
+    # Mirror current CPA: config API-key credentials are live AuthManager
+    # candidates even though host.auth.list may expose only physical OAuth/file
+    # auths. Scheduler identity is the candidate's exact live Auth.ID.
+    req={'Provider':'codex','Model':model,'Options':{'Headers':{'X-CPA-Key-Chain-Ticket':[ticket]}},'Candidates':[{'ID':LIVE_API_ID,'Provider':'codex','Priority':0,'Status':'active','Attributes':{'source':'config:codex[0]'}}]}
     sch=pcall('scheduler.pick',req)
-    assert sch['Handled'] is True and sch['AuthID']=='real-auth-target', sch
+    assert sch['Handled'] is True and sch['AuthID']==LIVE_API_ID, sch
     scheduler_first_pick_count += 1
     try:
         pcall('scheduler.pick',req)
@@ -63,7 +77,9 @@ def host_call(ctx, method, req, n, out):
     raw=bytes((c_uint8*n).from_address(addressof(req.contents))) if req and n else b'{}'
     payload=json.loads(raw or b'{}')
     if m=='host.auth.list':
-        return_bytes(out, env_ok({'files':[{'id':'oauth-a','auth_index':'1111222233334444','name':'a@example.com','provider':'codex','status':'active'},{'id':'real-auth-target','auth_index':'9b725f538a48ad68','name':'api@example.com','provider':'codex','status':'active'}]})); return 0
+        # Real CPA host.auth.list is authoritative for OAuth/file auths but does
+        # not necessarily expose config API-key AuthManager entries.
+        return_bytes(out, env_ok({'files':[{'id':'oauth-a','auth_index':'1111222233334444','name':'a@example.com','provider':'codex','status':'active'}]})); return 0
     if m=='host.log':
         logs.append(payload)
         return_bytes(out, env_ok({})); return 0
@@ -136,8 +152,9 @@ with tempfile.TemporaryDirectory() as td:
     key='sk-down-xyz'
     fp=hashlib.sha256(key.encode()).hexdigest()
     open(cfg_path,'w').write('''api-keys:\n  - sk-down-xyz\ncodex-api-key:\n  - api-key: sk-up\n    base-url: https://up.example/v1\n    prefix: plus\n    models:\n      - name: gpt-5.6-luna\n        alias: luna\n''')
-    # Feed a v0.3 state to exercise automatic migration into one v0.4 Policy.
-    open(state_path,'w').write(json.dumps({'version':3,'routes':{'r1':{'id':'r1','name':'test','key_fingerprint':fp,'key_hint':'sk-d…-xyz','enabled':True,'match_models':['*'],'candidates':[{'id':'c1','name':'codex-api','resource_id':'api:codex:x:0','resource_kind':'API','provider':'codex','auth_index':'9b725f538a48ad68','override_model':'','enabled':True}]}}}))
+    # Feed a v0.3 state with KCR's legacy synthetic API AuthIndex. Current CPA's
+    # live ID is different and appears only in scheduler Candidates.
+    open(state_path,'w').write(json.dumps({'version':3,'routes':{'r1':{'id':'r1','name':'test','key_fingerprint':fp,'key_hint':'sk-d…-xyz','enabled':True,'match_models':['*'],'candidates':[{'id':'c1','name':'codex-api','resource_id':'api:codex:x:0','resource_kind':'API','provider':'codex','auth_index':LEGACY_API_INDEX,'override_model':'','enabled':True}]}}}))
     y=f'enabled: true\nstate_file: {state_path}\ncpa_config_file: {cfg_path}\nticket_ttl_seconds: 30\n'
     encoded=base64.b64encode(y.encode()).decode()
     reg=pcall('plugin.register',{'config_yaml':encoded,'schema_version':5})
@@ -171,14 +188,13 @@ with tempfile.TemporaryDirectory() as td:
     ex=pcall('executor.execute',{'Model':'gpt-anything','SourceFormat':'openai-response','Headers':{'Authorization':['Bearer '+key]},'OriginalRequest':base64.b64encode(b'{"model":"gpt-anything","input":"hi"}').decode(),'Payload':base64.b64encode(b'{"model":"gpt-anything","input":"hi"}').decode(),'Query':{},'Metadata':{},'host_callback_id':'cb1'})
     assert captured_ticket, 'executor did not issue ticket'
     assert captured_model=='gpt-anything', captured_model
-    # Debug response headers are off by default.
+    assert scheduler_first_pick_count >= 1, scheduler_first_pick_count
     assert not any(k.lower().startswith('x-kcr-') for k in (ex.get('Headers') or {}).keys())
 
     first_ticket=captured_ticket
-    assert scheduler_first_pick_count >= 1, scheduler_first_pick_count
     assert scheduler_second_pick_blocked is True
     try:
-        pcall('scheduler.pick',{'Provider':'codex','Model':'gpt-anything','Options':{'Headers':{'X-CPA-Key-Chain-Ticket':[first_ticket]}},'Candidates':[{'ID':'wrong-candidate-id','Provider':'codex','AuthIndex':'9b725f538a48ad68'}]})
+        pcall('scheduler.pick',{'Provider':'codex','Model':'gpt-anything','Options':{'Headers':{'X-CPA-Key-Chain-Ticket':[first_ticket]}},'Candidates':[{'ID':LIVE_API_ID,'Provider':'codex'}]})
     except RuntimeError:
         pass
     else:
