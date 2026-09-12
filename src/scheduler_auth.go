@@ -25,10 +25,22 @@ func resolveAuthIDByIndex(authIndex, provider string) (string, error) {
 	}
 
 	id := authIDFromEntries(resp.Files, authIndex, provider)
-	if id == "" {
-		return "", fmt.Errorf("auth index %q not found in host.auth.list", authIndex)
+	if id != "" {
+		return id, nil
 	}
-	return id, nil
+
+	// KCR <= v0.6.7 synthesized API-provider AuthIndex values from config.yaml.
+	// Current CPA owns identity in its live AuthManager and uses a different
+	// StableID seed, so bridge an existing policy only when config metadata and
+	// live runtime auth identify exactly one credential.
+	legacyID, _, reconcileErr := resolveLegacySyntheticAuthV8(raw, authIndex, provider)
+	if reconcileErr != nil {
+		return "", reconcileErr
+	}
+	if legacyID != "" {
+		return legacyID, nil
+	}
+	return "", fmt.Errorf("auth index %q not found in host.auth.list", authIndex)
 }
 
 func authIDFromEntries(entries []hostAuthEntry, authIndex, provider string) string {
