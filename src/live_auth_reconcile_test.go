@@ -73,6 +73,18 @@ func TestLegacySyntheticAPIAuthIndexUsesExactRuntimeIDForSameBaseURL(t *testing.
 	}
 }
 
+func TestLegacySyntheticAPIAuthIndexIncludesProxyPrefixAndHeaders(t *testing.T) {
+	config := "codex-api-key:\n  - api-key: sk-up\n    base-url: https://up.example/v1\n    proxy-url: http://proxy.local:8080\n    prefix: /plus/\n    headers:\n      X-Z: z\n      X-A: a\n"
+	withCPAConfigPathForTest(t, config)
+	_, resources := parseCPAConfig(config)
+	stale := resources[0].AuthIndex
+	ids := legacyCurrentRuntimeIDsV8(config, stale, "codex")
+	want := stableID("codex:apikey", "sk-up", "https://up.example/v1", "http://proxy.local:8080", "plus", "X-A\x00a\x00X-Z\x00z\x00")
+	if len(ids) != 1 || ids[0] != want {
+		t.Fatalf("runtime IDs=%#v, want %q", ids, want)
+	}
+}
+
 func TestLegacySyntheticAPIAuthIndexRefusesAmbiguousLiveCredentials(t *testing.T) {
 	config := "codex-api-key:\n  - api-key: sk-up\n    base-url: https://up.example/v1\n"
 	withCPAConfigPathForTest(t, config)
