@@ -26,7 +26,7 @@ func withCPAConfigPathForTest(t *testing.T, content string) string {
 	return path
 }
 
-func TestLegacySyntheticAPIAuthIndexResolvesToLiveCredential(t *testing.T) {
+func TestLegacySyntheticAPIAuthIndexResolvesOnlyExactLiveCredential(t *testing.T) {
 	config := "codex-api-key:\n  - api-key: sk-up\n    base-url: https://up.example/v1\n    prefix: plus\n"
 	withCPAConfigPathForTest(t, config)
 	_, resources := parseCPAConfig(config)
@@ -34,17 +34,21 @@ func TestLegacySyntheticAPIAuthIndexResolvesToLiveCredential(t *testing.T) {
 		t.Fatalf("config resources = %#v", resources)
 	}
 	stale := resources[0].AuthIndex
+	exact := legacyCurrentRuntimeIDsV8(config, stale, "codex")
+	if len(exact) != 1 {
+		t.Fatalf("exact runtime IDs=%#v, want one", exact)
+	}
 
 	raw, _ := json.Marshal(liveAuthListResponseV8{Files: []liveAuthEntryV8{{
-		ID: "codex-runtime-id", AuthIndex: "live-auth-index", Provider: "codex",
+		ID: exact[0], AuthIndex: "live-auth-index", Provider: "codex",
 		BaseURL: "https://up.example/v1/", RuntimeOnly: true,
 	}}})
 	id, idx, err := resolveLegacySyntheticAuthV8(raw, stale, "codex")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if id != "codex-runtime-id" || idx != "live-auth-index" {
-		t.Fatalf("resolved=(%q,%q), want live credential", id, idx)
+	if id != exact[0] || idx != "live-auth-index" {
+		t.Fatalf("resolved=(%q,%q), want exact live credential", id, idx)
 	}
 }
 
@@ -85,17 +89,25 @@ func TestLegacySyntheticAPIAuthIndexIncludesProxyPrefixAndHeaders(t *testing.T) 
 	}
 }
 
-func TestLegacySyntheticAPIAuthIndexRefusesAmbiguousLiveCredentials(t *testing.T) {
-	config := "codex-api-key:\n  - api-key: sk-up\n    base-url: https://up.example/v1\n"
+func TestLegacySyntheticAPIAuthIndexRefusesUnrelatedSameBaseURLCredential(t *testing.T) {
+	config := "codex-api-key:\n  - api-key: sk-intended\n    base-url: https://up.example/v1\n"
 	withCPAConfigPathForTest(t, config)
 	_, resources := parseCPAConfig(config)
 	stale := resources[0].AuthIndex
-	raw, _ := json.Marshal(liveAuthListResponseV8{Files: []liveAuthEntryV8{
-		{ID: "runtime-a", AuthIndex: "live-a", Provider: "codex", BaseURL: "https://up.example/v1", RuntimeOnly: true},
-		{ID: "runtime-b", AuthIndex: "live-b", Provider: "codex", BaseURL: "https://up.example/v1", RuntimeOnly: true},
-	}})
-	if _, _, err := resolveLegacySyntheticAuthV8(raw, stale, "codex"); err == nil {
-		t.Fatal("ambiguous live credentials must fail closed")
+
+	// The intended current StableID is deliberately absent. A different API key
+	// happens to be the only live credential with the same provider/base URL.
+	unrelated := stableID("codex:apikey", "sk-other", "https://up.example/v1", "", "", "")
+	raw, _ := json.Marshal(liveAuthListResponseV8{Files: []liveAuthEntryV8{{
+		ID: unrelated, AuthIndex: "live-other", Provider: "codex",
+		BaseURL: "https://up.example/v1", RuntimeOnly: true,
+	}}})
+	id, idx, err := resolveLegacySyntheticAuthV8(raw, stale, "codex")
+	if err == nil {
+		t.Fatal("missing exact runtime identity must fail closed even with one same-base live credential")
+	}
+	if id != "" || idx != "" {
+		t.Fatalf("unrelated credential must not be returned: (%q,%q)", id, idx)
 	}
 }
 
@@ -104,15 +116,19 @@ func TestLegacySyntheticAPIAuthIndexNeverMatchesOAuth(t *testing.T) {
 	withCPAConfigPathForTest(t, config)
 	_, resources := parseCPAConfig(config)
 	stale := resources[0].AuthIndex
+	exact := legacyCurrentRuntimeIDsV8(config, stale, "codex")
+	if len(exact) != 1 {
+		t.Fatalf("exact runtime IDs=%#v", exact)
+	}
 	raw, _ := json.Marshal(liveAuthListResponseV8{Files: []liveAuthEntryV8{{
-		ID: "oauth-a", AuthIndex: "oauth-index", Provider: "codex",
+		ID: exact[0], AuthIndex: "oauth-index", Provider: "codex",
 		BaseURL: "https://up.example/v1", RuntimeOnly: false,
 	}}})
 	id, idx, err := resolveLegacySyntheticAuthV8(raw, stale, "codex")
-	if err != nil {
-		t.Fatal(err)
+	if err == nil {
+		t.Fatal("OAuth credential must not satisfy API reconciliation")
 	}
 	if id != "" || idx != "" {
-		t.Fatalf("OAuth credential must not satisfy API reconciliation: (%q,%q)", id, idx)
+		t.Fatalf("OAuth credential must not be returned: (%q,%q)", id, idx)
 	}
 }
