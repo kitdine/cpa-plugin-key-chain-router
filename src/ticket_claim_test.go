@@ -1,8 +1,28 @@
 package main
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
+
+func withTicketRuntimeForTest(t *testing.T) {
+	t.Helper()
+	runtimeState.Lock()
+	oldTickets := runtimeState.tickets
+	oldTTL := runtimeState.cfg.TicketTTL
+	runtimeState.tickets = map[string]ticketRecord{}
+	runtimeState.cfg.TicketTTL = time.Minute
+	runtimeState.Unlock()
+	t.Cleanup(func() {
+		runtimeState.Lock()
+		runtimeState.tickets = oldTickets
+		runtimeState.cfg.TicketTTL = oldTTL
+		runtimeState.Unlock()
+	})
+}
 
 func TestFinishExecutionTicketRequiresClaim(t *testing.T) {
+	withTicketRuntimeForTest(t)
 	tok := issueTicket("idx-a", "codex")
 	if finishExecutionTicket(tok) {
 		t.Fatal("unclaimed execution ticket must fail closed")
@@ -13,6 +33,7 @@ func TestFinishExecutionTicketRequiresClaim(t *testing.T) {
 }
 
 func TestFinishExecutionTicketAcceptsClaimedTicket(t *testing.T) {
+	withTicketRuntimeForTest(t)
 	tok := issueTicket("idx-a", "codex")
 	rec, ok, first := claimTicket(tok)
 	if !ok || !first || rec.AuthIndex != "idx-a" {
