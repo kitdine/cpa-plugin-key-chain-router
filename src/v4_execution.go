@@ -134,9 +134,12 @@ func executeCandidateV4(c *PolicyCandidate, source, clientModel string, body []b
 		method = methodHostModelExecuteStream
 	}
 	raw, err := callHost(method, map[string]any{"entry_protocol": source, "exit_protocol": source, "model": model, "stream": stream, "body": rewriteBodyModel(body, model), "headers": h, "query": query, "alt": alt, "host_callback_id": callbackID})
-	revokeTicket(ticket)
+	claimed := finishExecutionTicket(ticket)
 	ar := attemptResult{Candidate: c.Name, Provider: c.Provider, AuthIndex: c.AuthIndex, Model: model, Duration: time.Since(started)}
 	ar.DurationMs = ar.Duration.Milliseconds()
+	if err == nil && ticket != "" && !claimed {
+		err = errSchedulerTicketUnclaimed
+	}
 	if err != nil {
 		ar.Error = err.Error()
 		ar.Status = statusFromError(err)
@@ -250,9 +253,16 @@ func runStreamPolicyV4(trace string, p *Policy, r *PolicyRule, ranked []*PolicyC
 		}
 		t := time.Now()
 		raw, err := callHost(methodHostModelExecuteStream, map[string]any{"entry_protocol": source, "exit_protocol": source, "model": model, "stream": true, "body": rewriteBodyModel(body, model), "headers": h, "query": query, "alt": alt, "host_callback_id": callbackID})
-		revokeTicket(ticket)
+		claimed := finishExecutionTicket(ticket)
 		ar := attemptResult{Candidate: c.Name, Provider: c.Provider, AuthIndex: c.AuthIndex, Model: model, Duration: time.Since(t)}
 		ar.DurationMs = ar.Duration.Milliseconds()
+		if err == nil && ticket != "" && !claimed {
+			var leaked hostModelStreamResponse
+			if json.Unmarshal(raw, &leaked) == nil && leaked.StreamID != "" {
+				_ = closeHostStream(leaked.StreamID)
+			}
+			err = errSchedulerTicketUnclaimed
+		}
 		if err != nil {
 			ar.Error = err.Error()
 			ar.Status = statusFromError(err)
