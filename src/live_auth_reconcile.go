@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 )
 
@@ -67,11 +68,8 @@ func resolveLegacySyntheticAuthV8(rawAuthList []byte, staleAuthIndex, provider s
 		return "", "", fmt.Errorf("decode live auth list for legacy reconciliation: %w", err)
 	}
 
-	// For the common case (including multiple keys sharing one base URL), rebuild
-	// the current CPA StableID from the same config entry and match by runtime ID.
-	// Custom headers are not represented by KCR's lightweight YAML parser; when
-	// they affect the CPA ID this exact path simply misses and the unique-base
-	// fallback below remains fail-closed.
+	// Rebuild current CPA StableIDs from the legacy config entry, including
+	// proxy-url, normalized prefix and deterministically sorted custom headers.
 	exactIDs := legacyCurrentRuntimeIDsV8(configRaw, staleAuthIndex, provider)
 	if len(exactIDs) > 0 {
 		exactSet := make(map[string]struct{}, len(exactIDs))
@@ -141,7 +139,9 @@ func legacyCurrentRuntimeIDsV8(rawConfig, staleAuthIndex, provider string) []str
 		if !strings.EqualFold(spec.provider, provider) {
 			continue
 		}
-		for _, e := range parseTopMapList(lines, spec.section) {
+		entries := parseTopMapList(lines, spec.section)
+		headers := topMapHeadersV8(lines, spec.section)
+		for i, e := range entries {
 			key := scalar(e.Fields["api-key"])
 			base := scalar(e.Fields["base-url"])
 			proxyURL := scalar(e.Fields["proxy-url"])
@@ -159,7 +159,11 @@ func legacyCurrentRuntimeIDsV8(rawConfig, staleAuthIndex, provider string) []str
 			if spec.vertex {
 				out = append(out, stableID(spec.liveKind, key, base, proxyURL))
 			} else {
-				out = append(out, stableID(spec.liveKind, key, base, proxyURL, prefix, ""))
+				headerString := ""
+				if i < len(headers) {
+					headerString = formatSortedHeadersV8(headers[i])
+				}
+				out = append(out, stableID(spec.liveKind, key, base, proxyURL, prefix, headerString))
 			}
 		}
 	}
@@ -204,6 +208,74 @@ func legacyCurrentRuntimeIDsV8(rawConfig, staleAuthIndex, provider string) []str
 		}
 	}
 	return out
+}
+
+// topMapHeadersV8 extracts a simple `headers:` string map for each top-level
+// list item in a config section. It intentionally mirrors only the shape used by
+// CPA API-key credentials and leaves the general lightweight parser unchanged.
+func topMapHeadersV8(lines []yamlLine, section string) []map[string]string {
+	start, end := sectionBounds(lines, section)
+	if start < 0 {
+		return nil
+	}
+	out := []map[string]string{}
+	for i := start; i < end; {
+		if lines[i].Indent != 2 || !strings.HasPrefix(lines[i].Text, "-") {
+			i++
+			continue
+		}
+		itemEnd := i + 1
+		for itemEnd < end && !(lines[itemEnd].Indent == 2 && strings.HasPrefix(lines[itemEnd].Text, "-")) {
+			itemEnd++
+		}
+		headers := map[string]string{}
+		for j := i + 1; j < itemEnd; j++ {
+			if lines[j].Indent != 4 {
+				continue
+			}
+			key, value, ok := splitYAMLKeyValue(lines[j].Text)
+			if !ok || !strings.EqualFold(strings.TrimSpace(key), "headers") || strings.TrimSpace(value) != "" {
+				continue
+			}
+			for k := j + 1; k < itemEnd && lines[k].Indent > 4; k++ {
+				if lines[k].Indent != 6 {
+					continue
+				}
+				hk, hv, ok := splitYAMLKeyValue(lines[k].Text)
+				if !ok {
+					continue
+				}
+				hk = strings.TrimSpace(scalar(hk))
+				hv = strings.TrimSpace(scalar(hv))
+				if hk != "" && hv != "" {
+					headers[hk] = hv
+				}
+			}
+			break
+		}
+		out = append(out, headers)
+		i = itemEnd
+	}
+	return out
+}
+
+func formatSortedHeadersV8(headers map[string]string) string {
+	if len(headers) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(headers))
+	for key := range headers {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, key := range keys {
+		b.WriteString(key)
+		b.WriteByte(0)
+		b.WriteString(headers[key])
+		b.WriteByte(0)
+	}
+	return b.String()
 }
 
 func normalizePrefixV8(v string) string {
