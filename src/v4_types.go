@@ -74,9 +74,11 @@ type PolicyCandidate struct {
 	// the currently configured runtime generation.
 	runtimeGeneration uint64
 
-	// executionOriginalOverride is request-local. A ranked candidate clone may
-	// temporarily use a prefix-scoped OverrideModel for the nested CPA request;
-	// health/config identity comparisons restore this original persisted value.
+	// executionScoped/executionOriginalOverride are request-local. A ranked
+	// candidate clone may temporarily use a prefix-scoped OverrideModel for the
+	// nested CPA request while health/config identity comparisons continue to use
+	// the persisted override (which may itself be empty).
+	executionScoped           bool
 	executionOriginalOverride string
 }
 
