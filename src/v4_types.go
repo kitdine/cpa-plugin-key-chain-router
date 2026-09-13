@@ -74,12 +74,10 @@ type PolicyCandidate struct {
 	// the currently configured runtime generation.
 	runtimeGeneration uint64
 
-	// executionModel/executionAuthIndex/executionScopeError are request-local.
-	// They let KCR scope the nested CPA execution without changing the persisted
-	// candidate identity that health-generation checks compare against.
-	executionModel       string
-	executionAuthIndex   string
-	executionScopeError string
+	// executionOriginalOverride is request-local. A ranked candidate clone may
+	// temporarily use a prefix-scoped OverrideModel for the nested CPA request;
+	// health/config identity comparisons restore this original persisted value.
+	executionOriginalOverride string
 }
 
 type FailoverPolicy struct {
