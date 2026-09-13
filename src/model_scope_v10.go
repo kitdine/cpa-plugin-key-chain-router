@@ -11,6 +11,15 @@ func candidateScopedModelV10(c *PolicyCandidate, clientModel string) (string, st
 	if target == nil { return model, "" }
 	prefix := strings.Trim(strings.TrimSpace(target.Prefix), "/")
 	if prefix == "" { return model, "" }
+
+	// For config API credentials, an empty parsed Models list is ambiguous: it
+	// can mean no explicit models or a YAML form KCR's lightweight parser did not
+	// understand. Never fabricate prefix/<model> in that case. OAuth/file auths
+	// get their model set from CPA runtime registration and can safely use prefix.
+	if strings.EqualFold(strings.TrimSpace(target.Kind), "API") && len(target.Models) == 0 {
+		return model, ""
+	}
+
 	base := model
 	for _, r := range resources {
 		p := strings.Trim(strings.TrimSpace(r.Prefix), "/")
