@@ -111,3 +111,16 @@ func TestV10TicketPrefersPersistedLiveAuthID(t *testing.T) {
 	if identity != directLiveIdentityPrefixV10+"live-auth-1" { t.Fatalf("ticket identity=%q", identity) }
 	if id, err := resolveAuthIDByIndex(identity, "codex"); err != nil || id != "live-auth-1" { t.Fatalf("direct identity resolution id=%q err=%v", id, err) }
 }
+
+func TestV10LiveAuthIDChangeChangesResourceAndHealthIdentity(t *testing.T) {
+	oldResourceID := liveBoundResourceIDV10("codex", "codex:apikey:old")
+	newResourceID := liveBoundResourceIDV10("codex", "codex:apikey:new")
+	if oldResourceID == "" || newResourceID == "" || oldResourceID == newResourceID {
+		t.Fatalf("live-bound resource IDs did not change: old=%q new=%q", oldResourceID, newResourceID)
+	}
+	oldCandidate := &PolicyCandidate{ID: "c1", ResourceID: oldResourceID, ResourceKind: "API", Provider: "codex", AuthID: "codex:apikey:old", AuthIndex: "same-index", Enabled: true}
+	newCandidate := &PolicyCandidate{ID: "c1", ResourceID: newResourceID, ResourceKind: "API", Provider: "codex", AuthID: "codex:apikey:new", AuthIndex: "same-index", Enabled: true}
+	if candidateHealthConfigEqualV4(oldCandidate, newCandidate) {
+		t.Fatal("live AuthID change must invalidate candidate health/config identity")
+	}
+}
