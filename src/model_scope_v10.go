@@ -42,37 +42,26 @@ func candidateScopedModelV10(c *PolicyCandidate, clientModel string) (string, st
 	return prefix + "/" + base, prefix
 }
 
-// scopeCandidateModelsV9 is kept at the existing call site but now implements
-// the v0.7 execution plan: request-local clones use an exact live Auth.ID token
-// and, where CPA already registered one, a credential-qualified model prefix.
-// Persisted policy identity is retained in hidden originals for health checks.
+// The scheduler resolves the candidate's persisted AuthIndex/AuthID to the
+// authoritative live CPA Auth.ID on every ticket claim. Only the request model
+// is rewritten here; auth identity remains unchanged so health/config checks
+// retain their persisted identity without any special-case auth comparison.
 func scopeCandidateModelsV9(candidates []*PolicyCandidate, clientModel string) []*PolicyCandidate {
 	for _, c := range candidates {
 		if c == nil {
 			continue
 		}
-		originalOverride := c.OverrideModel
-		originalAuthIndex := c.AuthIndex
 		scopedModel, _ := candidateScopedModelV10(c, clientModel)
 		currentModel := strings.TrimSpace(c.OverrideModel)
 		if currentModel == "" {
 			currentModel = strings.TrimSpace(clientModel)
 		}
-		liveID, _ := liveIDForCandidateV10(c)
-		modelChanged := scopedModel != "" && scopedModel != currentModel
-		authChanged := strings.TrimSpace(liveID) != ""
-		if !modelChanged && !authChanged {
+		if scopedModel == "" || scopedModel == currentModel {
 			continue
 		}
 		c.executionScoped = true
-		c.executionOriginalOverride = originalOverride
-		c.executionOriginalAuthIndex = originalAuthIndex
-		if modelChanged {
-			c.OverrideModel = scopedModel
-		}
-		if authChanged {
-			c.AuthIndex = directLiveIdentityPrefixV10 + strings.TrimSpace(liveID)
-		}
+		c.executionOriginalOverride = c.OverrideModel
+		c.OverrideModel = scopedModel
 	}
 	return candidates
 }
