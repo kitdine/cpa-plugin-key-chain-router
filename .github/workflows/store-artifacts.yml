@@ -72,3 +72,128 @@ jobs:
             git commit -m "store: publish ${VERSION}"
             git push origin HEAD:plugin-store-artifacts
           fi
+
+      - name: Update registry metadata on main
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          NAME="key-chain-router_${VERSION}_linux_amd64.zip"
+          SHA256="$(sha256sum "/tmp/${NAME}" | awk '{print $1}')"
+          SIZE="$(stat -c '%s' "/tmp/${NAME}")"
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+          update_registry() {
+            python3 - "$VERSION" "$NAME" "$SHA256" "$SIZE" "$GITHUB_REPOSITORY" <<'PY'
+          import json
+          import re
+          import sys
+
+          version, name, sha256, size, repository = sys.argv[1:]
+          path = "registry.json"
+          semver_re = re.compile(
+              r"^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
+              r"(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?"
+              r"(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$"
+          )
+
+          def parse_semver(value: str):
+              match = semver_re.fullmatch(str(value).strip())
+              if not match:
+                  raise SystemExit(f"unsupported registry version format: {value!r}")
+              core = tuple(int(part) for part in match.group(1, 2, 3))
+              prerelease = match.group(4)
+              identifiers = None if prerelease is None else prerelease.split(".")
+              return core, identifiers
+
+          def compare_semver(left: str, right: str) -> int:
+              left_core, left_pre = parse_semver(left)
+              right_core, right_pre = parse_semver(right)
+              if left_core != right_core:
+                  return 1 if left_core > right_core else -1
+              if left_pre is None and right_pre is None:
+                  return 0
+              if left_pre is None:
+                  return 1
+              if right_pre is None:
+                  return -1
+              for left_id, right_id in zip(left_pre, right_pre):
+                  if left_id == right_id:
+                      continue
+                  left_num = left_id.isdigit()
+                  right_num = right_id.isdigit()
+                  if left_num and right_num:
+                      return 1 if int(left_id) > int(right_id) else -1
+                  if left_num != right_num:
+                      return -1 if left_num else 1
+                  return 1 if left_id > right_id else -1
+              if len(left_pre) == len(right_pre):
+                  return 0
+              return 1 if len(left_pre) > len(right_pre) else -1
+
+          with open(path, "r", encoding="utf-8") as f:
+              data = json.load(f)
+
+          plugin = next((p for p in data.get("plugins", []) if p.get("id") == "key-chain-router"), None)
+          if plugin is None:
+              raise SystemExit("key-chain-router missing from registry.json")
+
+          current_version = str(plugin.get("version", "")).strip()
+          precedence = compare_semver(current_version, version)
+          if precedence > 0 or (precedence == 0 and current_version != version):
+              print(
+                  f"registry {current_version} is newer or has a different equal-precedence build identity "
+                  f"than requested {version}; keeping current metadata"
+              )
+              raise SystemExit(0)
+
+          artifact = next(
+              (
+                  a
+                  for a in plugin.get("install", {}).get("artifacts", [])
+                  if a.get("goos") == "linux" and a.get("goarch") == "amd64"
+              ),
+              None,
+          )
+          if artifact is None:
+              raise SystemExit("linux/amd64 artifact missing from registry.json")
+
+          plugin["version"] = version
+          artifact["url"] = (
+              f"https://raw.githubusercontent.com/{repository}/"
+              f"plugin-store-artifacts/artifacts/{name}"
+          )
+          artifact["sha256"] = sha256
+          artifact["size"] = int(size)
+
+          with open(path, "w", encoding="utf-8") as f:
+              json.dump(data, f, ensure_ascii=False, indent=2)
+              f.write("\n")
+          PY
+          }
+
+          for attempt in 1 2 3; do
+            git fetch origin main
+            git switch -C main origin/main
+            update_registry
+
+            if git diff --quiet -- registry.json; then
+              echo "registry already current or protected from older/equal-precedence overwrite for ${VERSION}"
+              exit 0
+            fi
+
+            git add registry.json
+            git commit -m "store: registry ${VERSION}"
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+
+            echo "registry push conflicted with a newer main; refetching and reapplying (attempt ${attempt}/3)" >&2
+            if [[ "$attempt" -eq 3 ]]; then
+              echo "failed to update registry after 3 attempts" >&2
+              exit 1
+            fi
+          done
