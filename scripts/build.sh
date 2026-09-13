@@ -11,6 +11,7 @@ go test ./...
 go vet ./...
 if command -v node >/dev/null 2>&1; then
   node --check ui.js
+  node --check diag_ui_v10.js
 fi
 go build -buildvcs=false -buildmode=c-shared -trimpath -ldflags="-s -w -X main.pluginVersion=${VERSION}" -o "$DIST/key-chain-router-v${VERSION}.so" .
 cp "$DIST/key-chain-router-v${VERSION}.so" "$DIST/key-chain-router.so"
