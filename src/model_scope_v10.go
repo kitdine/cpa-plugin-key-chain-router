@@ -42,8 +42,23 @@ func candidateScopedModelV10(c *PolicyCandidate, clientModel string) (string, st
 	return prefix + "/" + base, prefix
 }
 
-// Compatibility shim for the abandoned v9 approach. Candidate identity is no
-// longer mutated before health selection; v0.7 scopes only inside execution.
-func scopeCandidateModelsV9(candidates []*PolicyCandidate, _ string) []*PolicyCandidate {
+// scopeCandidateModelsV9 now performs only request-local execution scoping.
+// ranked candidates are clones, so the persisted policy is never changed. The
+// original override is retained for health/config identity comparison.
+func scopeCandidateModelsV9(candidates []*PolicyCandidate, clientModel string) []*PolicyCandidate {
+	for _, c := range candidates {
+		if c == nil {
+			continue
+		}
+		scoped, _ := candidateScopedModelV10(c, clientModel)
+		if scoped == "" || scoped == strings.TrimSpace(c.OverrideModel) {
+			continue
+		}
+		if c.OverrideModel == "" && scoped == strings.TrimSpace(clientModel) {
+			continue
+		}
+		c.executionOriginalOverride = c.OverrideModel
+		c.OverrideModel = scoped
+	}
 	return candidates
 }
