@@ -42,26 +42,6 @@ func candidateScopedModelV10(c *PolicyCandidate, clientModel string) (string, st
 	return prefix + "/" + base, prefix
 }
 
-// The scheduler resolves the candidate's persisted AuthIndex/AuthID to the
-// authoritative live CPA Auth.ID on every ticket claim. Only the request model
-// is rewritten here; auth identity remains unchanged so health/config checks
-// retain their persisted identity without any special-case auth comparison.
-func scopeCandidateModelsV9(candidates []*PolicyCandidate, clientModel string) []*PolicyCandidate {
-	for _, c := range candidates {
-		if c == nil {
-			continue
-		}
-		scopedModel, _ := candidateScopedModelV10(c, clientModel)
-		currentModel := strings.TrimSpace(c.OverrideModel)
-		if currentModel == "" {
-			currentModel = strings.TrimSpace(clientModel)
-		}
-		if scopedModel == "" || scopedModel == currentModel {
-			continue
-		}
-		c.executionScoped = true
-		c.executionOriginalOverride = c.OverrideModel
-		c.OverrideModel = scopedModel
-	}
+func scopeCandidateModelsV9(candidates []*PolicyCandidate, _ string) []*PolicyCandidate {
 	return candidates
 }
