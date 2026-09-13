@@ -72,3 +72,62 @@ jobs:
             git commit -m "store: publish ${VERSION}"
             git push origin HEAD:plugin-store-artifacts
           fi
+
+      - name: Update registry metadata on main
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          NAME="key-chain-router_${VERSION}_linux_amd64.zip"
+          SHA256="$(sha256sum "/tmp/${NAME}" | awk '{print $1}')"
+          SIZE="$(stat -c '%s' "/tmp/${NAME}")"
+
+          git fetch origin main
+          git switch -C main origin/main
+
+          python3 - "$VERSION" "$NAME" "$SHA256" "$SIZE" "$GITHUB_REPOSITORY" <<'PY'
+          import json
+          import sys
+
+          version, name, sha256, size, repository = sys.argv[1:]
+          path = "registry.json"
+          with open(path, "r", encoding="utf-8") as f:
+              data = json.load(f)
+
+          plugin = next((p for p in data.get("plugins", []) if p.get("id") == "key-chain-router"), None)
+          if plugin is None:
+              raise SystemExit("key-chain-router missing from registry.json")
+
+          artifact = next(
+              (
+                  a
+                  for a in plugin.get("install", {}).get("artifacts", [])
+                  if a.get("goos") == "linux" and a.get("goarch") == "amd64"
+              ),
+              None,
+          )
+          if artifact is None:
+              raise SystemExit("linux/amd64 artifact missing from registry.json")
+
+          plugin["version"] = version
+          artifact["url"] = (
+              f"https://raw.githubusercontent.com/{repository}/"
+              f"plugin-store-artifacts/artifacts/{name}"
+          )
+          artifact["sha256"] = sha256
+          artifact["size"] = int(size)
+
+          with open(path, "w", encoding="utf-8") as f:
+              json.dump(data, f, ensure_ascii=False, indent=2)
+              f.write("\n")
+          PY
+
+          if git diff --quiet -- registry.json; then
+            echo "registry already points to ${VERSION}"
+            exit 0
+          fi
+
+          git add registry.json
+          git commit -m "store: registry ${VERSION}"
+          git push origin HEAD:main
