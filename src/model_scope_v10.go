@@ -42,21 +42,20 @@ func candidateScopedModelV10(c *PolicyCandidate, clientModel string) (string, st
 	return prefix + "/" + base, prefix
 }
 
-// scopeCandidateModelsV9 now performs only request-local execution scoping.
-// ranked candidates are clones, so the persisted policy is never changed. The
-// original override is retained for health/config identity comparison.
 func scopeCandidateModelsV9(candidates []*PolicyCandidate, clientModel string) []*PolicyCandidate {
 	for _, c := range candidates {
 		if c == nil {
 			continue
 		}
 		scoped, _ := candidateScopedModelV10(c, clientModel)
-		if scoped == "" || scoped == strings.TrimSpace(c.OverrideModel) {
+		current := strings.TrimSpace(c.OverrideModel)
+		if current == "" {
+			current = strings.TrimSpace(clientModel)
+		}
+		if scoped == "" || scoped == current {
 			continue
 		}
-		if c.OverrideModel == "" && scoped == strings.TrimSpace(clientModel) {
-			continue
-		}
+		c.executionScoped = true
 		c.executionOriginalOverride = c.OverrideModel
 		c.OverrideModel = scoped
 	}
