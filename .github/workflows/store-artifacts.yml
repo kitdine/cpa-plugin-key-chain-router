@@ -142,8 +142,12 @@ jobs:
               raise SystemExit("key-chain-router missing from registry.json")
 
           current_version = str(plugin.get("version", "")).strip()
-          if compare_semver(current_version, version) > 0:
-              print(f"registry {current_version} is newer than requested {version}; keeping newer metadata")
+          precedence = compare_semver(current_version, version)
+          if precedence > 0 or (precedence == 0 and current_version != version):
+              print(
+                  f"registry {current_version} is newer or has a different equal-precedence build identity "
+                  f"than requested {version}; keeping current metadata"
+              )
               raise SystemExit(0)
 
           artifact = next(
@@ -177,7 +181,7 @@ jobs:
             update_registry
 
             if git diff --quiet -- registry.json; then
-              echo "registry already current or newer than ${VERSION}"
+              echo "registry already current or protected from older/equal-precedence overwrite for ${VERSION}"
               exit 0
             fi
 
