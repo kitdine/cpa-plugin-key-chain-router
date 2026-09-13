@@ -10,20 +10,8 @@ func candidateScopedModelV10(c *PolicyCandidate, clientModel string) (string, st
 	if c == nil || model == "" {
 		return model, ""
 	}
-	_, resources, _ := currentEnvironment()
-	var target *apiResource
-	for i := range resources {
-		r := &resources[i]
-		if !strings.EqualFold(strings.TrimSpace(r.Provider), strings.TrimSpace(c.Provider)) {
-			continue
-		}
-		if strings.TrimSpace(c.AuthIndex) != "" && strings.TrimSpace(r.AuthIndex) == strings.TrimSpace(c.AuthIndex) {
-			if target != nil {
-				return model, ""
-			}
-			target = r
-		}
-	}
+	resources := resourcesWithExactIDsV10()
+	target := exactResourceForCandidateV10(c, resources)
 	if target == nil {
 		return model, ""
 	}
@@ -52,4 +40,10 @@ func candidateScopedModelV10(c *PolicyCandidate, clientModel string) (string, st
 		}
 	}
 	return prefix + "/" + base, prefix
+}
+
+// Compatibility shim for the abandoned v9 approach. Candidate identity is no
+// longer mutated before health selection; v0.7 scopes only inside execution.
+func scopeCandidateModelsV9(candidates []*PolicyCandidate, _ string) []*PolicyCandidate {
+	return candidates
 }
