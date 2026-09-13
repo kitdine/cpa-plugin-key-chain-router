@@ -94,12 +94,45 @@ jobs:
 
           version, name, sha256, size, repository = sys.argv[1:]
           path = "registry.json"
+          semver_re = re.compile(
+              r"^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
+              r"(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?"
+              r"(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$"
+          )
 
-          def version_key(value: str):
-              match = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)", str(value).strip())
+          def parse_semver(value: str):
+              match = semver_re.fullmatch(str(value).strip())
               if not match:
                   raise SystemExit(f"unsupported registry version format: {value!r}")
-              return tuple(int(part) for part in match.groups())
+              core = tuple(int(part) for part in match.group(1, 2, 3))
+              prerelease = match.group(4)
+              identifiers = None if prerelease is None else prerelease.split(".")
+              return core, identifiers
+
+          def compare_semver(left: str, right: str) -> int:
+              left_core, left_pre = parse_semver(left)
+              right_core, right_pre = parse_semver(right)
+              if left_core != right_core:
+                  return 1 if left_core > right_core else -1
+              if left_pre is None and right_pre is None:
+                  return 0
+              if left_pre is None:
+                  return 1
+              if right_pre is None:
+                  return -1
+              for left_id, right_id in zip(left_pre, right_pre):
+                  if left_id == right_id:
+                      continue
+                  left_num = left_id.isdigit()
+                  right_num = right_id.isdigit()
+                  if left_num and right_num:
+                      return 1 if int(left_id) > int(right_id) else -1
+                  if left_num != right_num:
+                      return -1 if left_num else 1
+                  return 1 if left_id > right_id else -1
+              if len(left_pre) == len(right_pre):
+                  return 0
+              return 1 if len(left_pre) > len(right_pre) else -1
 
           with open(path, "r", encoding="utf-8") as f:
               data = json.load(f)
@@ -109,7 +142,7 @@ jobs:
               raise SystemExit("key-chain-router missing from registry.json")
 
           current_version = str(plugin.get("version", "")).strip()
-          if version_key(current_version) > version_key(version):
+          if compare_semver(current_version, version) > 0:
               print(f"registry {current_version} is newer than requested {version}; keeping newer metadata")
               raise SystemExit(0)
 
