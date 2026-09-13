@@ -32,6 +32,15 @@ func handleAPIV4(req managementRequest) (map[string]any, error) {
 			return nil, fmt.Errorf("invalid policy payload: %w", err)
 		}
 		normalizePolicyV4(&p)
+		// Persist the authoritative live Auth.ID whenever it can be resolved. New
+		// v0.7 policies therefore do not depend on KCR's historical synthetic
+		// AuthIndex for runtime pinning.
+		resources := resourcesWithExactIDsV10()
+		tmp := V4State{Policies: map[string]*Policy{p.KeyFingerprint: &p}}
+		rebindPoliciesV4(&tmp, resources)
+		if rebound := tmp.Policies[p.KeyFingerprint]; rebound != nil {
+			p = *rebound
+		}
 		if err := validatePolicy(&p); err != nil {
 			return nil, err
 		}
@@ -115,6 +124,9 @@ func normalizePolicyV4(p *Policy) {
 
 func buildSnapshotV4() map[string]any {
 	keys, resources, configErr := currentEnvironment()
+	if exact := resourcesWithExactIDsV10(); len(exact) > 0 {
+		resources = exact
+	}
 	v4Runtime.RLock()
 	st := cloneV4State(v4Runtime.state)
 	recent := append([]RoutingEvent(nil), v4Runtime.recent...)
@@ -454,6 +466,9 @@ func rebindPoliciesV4(st *V4State, resources []apiResource) {
 					c.ResourceID = x.ID
 					c.ResourceKind = x.Kind
 					c.Provider = x.Provider
+					if x.AuthID != "" {
+						c.AuthID = x.AuthID
+					}
 					if c.Name == "" {
 						c.Name = x.DisplayName
 					}
@@ -470,7 +485,7 @@ func diagnosePolicyV4(fp, model string) map[string]any {
 	if p == nil {
 		return map[string]any{"ok": false, "error": "policy not found"}
 	}
-	_, resources, _ := currentEnvironment()
+	resources := resourcesWithExactIDsV10()
 	st := V4State{Policies: map[string]*Policy{fp: p}}
 	rebindPoliciesV4(&st, resources)
 	p = st.Policies[fp]
@@ -488,7 +503,24 @@ func diagnosePolicyV4(fp, model string) map[string]any {
 		if effective {
 			effectiveFound = true
 		}
-		items = append(items, map[string]any{"order": i + 1, "name": c.Name, "provider": c.Provider, "auth_index": c.AuthIndex, "priority": c.Priority, "weight": c.Weight, "override_model": c.OverrideModel, "health": candidateHealthViewV4(p, rule, c), "selectable": selectable, "effective": effective})
+		execModel, prefix := candidateScopedModelV10(c, model)
+		liveID, identityErr := liveIDForCandidateV10(c)
+		item := map[string]any{
+			"order": i + 1, "name": c.Name, "provider": c.Provider,
+			"auth_id": liveID, "auth_index": c.AuthIndex,
+			"priority": c.Priority, "weight": c.Weight,
+			"override_model": c.OverrideModel, "execution_model": execModel,
+			"credential_prefix": prefix,
+			"health": candidateHealthViewV4(p, rule, c),
+			"selectable": selectable, "effective": effective,
+		}
+		if identityErr != nil {
+			item["identity_error"] = identityErr.Error()
+		}
+		if prefix == "" {
+			item["scope_note"] = "CPA host ABI has no forced-provider/auth field; exact scheduler pin is used, but a CPA-prefiltered credential may require a unique credential prefix"
+		}
+		items = append(items, item)
 	}
 	decision := decisionHandled
 	if rule.Strategy == strategyCPADefault {
