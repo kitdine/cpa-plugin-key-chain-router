@@ -73,6 +73,13 @@ type PolicyCandidate struct {
 	// serialized and lets delayed health results prove that they still belong to
 	// the currently configured runtime generation.
 	runtimeGeneration uint64
+
+	// executionModel/executionAuthIndex/executionScopeError are request-local.
+	// They let KCR scope the nested CPA execution without changing the persisted
+	// candidate identity that health-generation checks compare against.
+	executionModel       string
+	executionAuthIndex   string
+	executionScopeError string
 }
 
 type FailoverPolicy struct {
