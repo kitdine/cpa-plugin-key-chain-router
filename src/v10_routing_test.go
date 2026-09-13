@@ -107,6 +107,7 @@ func TestV10ExactIdentityNeverMigratesByConfigSlot(t *testing.T) {
 
 func TestV10TicketPrefersPersistedLiveAuthID(t *testing.T) {
 	c := &PolicyCandidate{AuthID: "live-auth-1", AuthIndex: "legacy-index", Provider: "codex"}
-	if got := ticketIdentityForCandidateV10(c); got != directLiveIdentityPrefixV10+"live-auth-1" { t.Fatalf("ticket identity=%q", got) }
-	if id, err := resolveAuthIDByIndex(got, "codex"); err != nil || id != "live-auth-1" { t.Fatalf("direct identity resolution id=%q err=%v", id, err) }
+	identity := ticketIdentityForCandidateV10(c)
+	if identity != directLiveIdentityPrefixV10+"live-auth-1" { t.Fatalf("ticket identity=%q", identity) }
+	if id, err := resolveAuthIDByIndex(identity, "codex"); err != nil || id != "live-auth-1" { t.Fatalf("direct identity resolution id=%q err=%v", id, err) }
 }
