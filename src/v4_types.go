@@ -73,13 +73,6 @@ type PolicyCandidate struct {
 	// serialized and lets delayed health results prove that they still belong to
 	// the currently configured runtime generation.
 	runtimeGeneration uint64
-
-	// Request-local execution fields. Ranked candidate clones may use a
-	// prefix-scoped model and a direct live Auth.ID token while health/config
-	// identity comparisons continue to use the persisted values.
-	executionScoped            bool
-	executionOriginalOverride  string
-	executionOriginalAuthIndex string
 }
 
 type FailoverPolicy struct {
