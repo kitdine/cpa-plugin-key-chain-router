@@ -4,13 +4,21 @@ import "strings"
 
 func candidateScopedModelV10(c *PolicyCandidate, clientModel string) (string, string) {
 	model := strings.TrimSpace(clientModel)
-	if c != nil && strings.TrimSpace(c.OverrideModel) != "" { model = strings.TrimSpace(c.OverrideModel) }
-	if c == nil || model == "" { return model, "" }
+	if c != nil && strings.TrimSpace(c.OverrideModel) != "" {
+		model = strings.TrimSpace(c.OverrideModel)
+	}
+	if c == nil || model == "" {
+		return model, ""
+	}
 	resources := resourcesForExecutionV10()
 	target := exactResourceForCandidateV10(c, resources)
-	if target == nil { return model, "" }
+	if target == nil {
+		return model, ""
+	}
 	prefix := strings.Trim(strings.TrimSpace(target.Prefix), "/")
-	if prefix == "" { return model, "" }
+	if prefix == "" {
+		return model, ""
+	}
 
 	// For config API credentials, an empty parsed Models list is ambiguous: it
 	// can mean no explicit models or a YAML form KCR's lightweight parser did not
@@ -31,9 +39,19 @@ func candidateScopedModelV10(c *PolicyCandidate, clientModel string) (string, st
 	if len(target.Models) > 0 {
 		ok := false
 		for _, registered := range target.Models {
-			if strings.EqualFold(strings.TrimSpace(registered), base) { ok = true; break }
+			registered = strings.TrimSpace(registered)
+			normalized := registered
+			if strings.HasPrefix(normalized, prefix+"/") {
+				normalized = strings.TrimSpace(strings.TrimPrefix(normalized, prefix+"/"))
+			}
+			if strings.EqualFold(normalized, base) || strings.EqualFold(registered, prefix+"/"+base) {
+				ok = true
+				break
+			}
 		}
-		if !ok { return model, "" }
+		if !ok {
+			return model, ""
+		}
 	}
 	return prefix + "/" + base, prefix
 }
