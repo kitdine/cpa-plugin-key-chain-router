@@ -194,6 +194,8 @@ func chooseHealthyCandidateV4(p *Policy, r *PolicyRule, ranked []*PolicyCandidat
 			if acquire {
 				ok, probe, generation, skipReason := acquireCandidateHealthWithReasonV4(p, r, c, now)
 				if ok {
+					// Return a per-attempt clone so concurrent requests never race while
+					// carrying the generation captured atomically with health acquisition.
 					acquired := *c
 					acquired.runtimeGeneration = generation
 					return &acquired, probe
@@ -292,6 +294,8 @@ func recordCandidateFailureV4(p *Policy, r *PolicyRule, c *PolicyCandidate, stat
 	}
 	cooldown, qualifies := candidateFailureCooldownV4(status, err, headers, level, now)
 	if !qualifies {
+		// A half-open probe that reaches the upstream and receives a request-specific
+		// non-health status proves transport reachability; do not strand the lease.
 		if isProbe && (h.ProbeInFlight || h.State == healthHalfOpen) {
 			h.State = healthClosed
 			h.ProbeInFlight = false
@@ -307,6 +311,9 @@ func recordCandidateFailureV4(p *Policy, r *PolicyRule, c *PolicyCandidate, stat
 	wasClosed := h.State == "" || h.State == healthClosed
 	switch {
 	case isProbe:
+		// Only a failed half-open recovery probe advances exponential backoff.
+		// Preserve a stronger deadline that may have been extended by a stale
+		// 401/403/429 response while this probe was in flight.
 		h.BackoffLevel = level
 		h.State = healthOpen
 		h.ProbeInFlight = false
@@ -315,11 +322,17 @@ func recordCandidateFailureV4(p *Policy, r *PolicyRule, c *PolicyCandidate, stat
 			h.NextProbeAt = proposedDeadline
 		}
 	case wasClosed:
+		// First failure opens the circuit at the base cooldown. Concurrent attempts
+		// that were already in flight must not escalate the backoff level.
 		h.State = healthOpen
 		h.ProbeInFlight = false
 		h.OpenedAt = now
 		h.NextProbeAt = proposedDeadline
 	default:
+		// This is a stale normal attempt that started before another request opened
+		// the circuit (or while a recovery probe is now running). Do not alter the
+		// state, probe lease, or backoff. Only stronger auth/rate-limit deadlines may
+		// extend an existing open deadline; never shorten it.
 		if status == 401 || status == 403 || status == 429 {
 			if h.NextProbeAt.IsZero() || proposedDeadline.After(h.NextProbeAt) {
 				h.NextProbeAt = proposedDeadline
@@ -353,6 +366,8 @@ func recordCandidateSuccessV4(p *Policy, r *PolicyRule, c *PolicyCandidate, prob
 	wasClosed := h.State == "" || h.State == healthClosed
 	ownsCurrentProbe := probeOwned && h.State == healthHalfOpen && h.ProbeInFlight
 	if !wasClosed && !ownsCurrentProbe {
+		// A stale normal success is telemetry only; it cannot cancel an OPEN
+		// recovery cycle or another request's HALF_OPEN probe lease.
 		return
 	}
 
@@ -490,19 +505,11 @@ func candidateHealthConfigEqualV4(a, b *PolicyCandidate) bool {
 	if a == nil || b == nil {
 		return a == b
 	}
-	aOverride := a.OverrideModel
-	if a.executionScoped {
-		aOverride = a.executionOriginalOverride
-	}
-	bOverride := b.OverrideModel
-	if b.executionScoped {
-		bOverride = b.executionOriginalOverride
-	}
 	return strings.TrimSpace(a.ResourceID) == strings.TrimSpace(b.ResourceID) &&
 		strings.TrimSpace(a.ResourceKind) == strings.TrimSpace(b.ResourceKind) &&
 		strings.TrimSpace(a.Provider) == strings.TrimSpace(b.Provider) &&
 		strings.TrimSpace(a.AuthIndex) == strings.TrimSpace(b.AuthIndex) &&
-		strings.TrimSpace(aOverride) == strings.TrimSpace(bOverride) &&
+		strings.TrimSpace(a.OverrideModel) == strings.TrimSpace(b.OverrideModel) &&
 		a.Enabled == b.Enabled
 }
 
@@ -588,6 +595,7 @@ func pruneCandidateHealthLockedV4() {
 				if key := candidateHealthKeyV4(p, r, c); key != "" {
 					valid[key] = struct{}{}
 				}
+			}
 		}
 	}
 	for key := range v4Runtime.health {
