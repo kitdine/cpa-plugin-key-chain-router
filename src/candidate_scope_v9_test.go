@@ -115,3 +115,25 @@ func TestScopeCandidateModelsV9DoesNotDoublePrefix(t *testing.T) {
 		t.Fatalf("OverrideModel=%q", candidate.OverrideModel)
 	}
 }
+
+func TestScopeCandidateModelsV9DoesNotInventPrefixForUnregisteredConfigModel(t *testing.T) {
+	config := `codex-api-key:
+  - api-key: sk-codex
+    prefix: plus
+    base-url: https://codex.example/v1
+    models:
+      - name: gpt-5.6-luna
+        alias: luna
+`
+	withCPAConfigPathForTest(t, config)
+	_, resources := parseCPAConfig(config)
+	if len(resources) != 1 {
+		t.Fatalf("resources=%#v", resources)
+	}
+	r := resources[0]
+	candidate := &PolicyCandidate{ResourceID: r.ID, ResourceKind: "API", Provider: r.Provider, AuthIndex: r.AuthIndex, Enabled: true}
+	scopeCandidateModelsV9([]*PolicyCandidate{candidate}, "gpt-anything")
+	if candidate.OverrideModel != "" {
+		t.Fatalf("unregistered model was incorrectly scoped: %q", candidate.OverrideModel)
+	}
+}
