@@ -83,21 +83,35 @@ jobs:
           SHA256="$(sha256sum "/tmp/${NAME}" | awk '{print $1}')"
           SIZE="$(stat -c '%s' "/tmp/${NAME}")"
 
-          git fetch origin main
-          git switch -C main origin/main
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
 
-          python3 - "$VERSION" "$NAME" "$SHA256" "$SIZE" "$GITHUB_REPOSITORY" <<'PY'
+          update_registry() {
+            python3 - "$VERSION" "$NAME" "$SHA256" "$SIZE" "$GITHUB_REPOSITORY" <<'PY'
           import json
+          import re
           import sys
 
           version, name, sha256, size, repository = sys.argv[1:]
           path = "registry.json"
+
+          def version_key(value: str):
+              match = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)", str(value).strip())
+              if not match:
+                  raise SystemExit(f"unsupported registry version format: {value!r}")
+              return tuple(int(part) for part in match.groups())
+
           with open(path, "r", encoding="utf-8") as f:
               data = json.load(f)
 
           plugin = next((p for p in data.get("plugins", []) if p.get("id") == "key-chain-router"), None)
           if plugin is None:
               raise SystemExit("key-chain-router missing from registry.json")
+
+          current_version = str(plugin.get("version", "")).strip()
+          if version_key(current_version) > version_key(version):
+              print(f"registry {current_version} is newer than requested {version}; keeping newer metadata")
+              raise SystemExit(0)
 
           artifact = next(
               (
@@ -122,12 +136,27 @@ jobs:
               json.dump(data, f, ensure_ascii=False, indent=2)
               f.write("\n")
           PY
+          }
 
-          if git diff --quiet -- registry.json; then
-            echo "registry already points to ${VERSION}"
-            exit 0
-          fi
+          for attempt in 1 2 3; do
+            git fetch origin main
+            git switch -C main origin/main
+            update_registry
 
-          git add registry.json
-          git commit -m "store: registry ${VERSION}"
-          git push origin HEAD:main
+            if git diff --quiet -- registry.json; then
+              echo "registry already current or newer than ${VERSION}"
+              exit 0
+            fi
+
+            git add registry.json
+            git commit -m "store: registry ${VERSION}"
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+
+            echo "registry push conflicted with a newer main; refetching and reapplying (attempt ${attempt}/3)" >&2
+            if [[ "$attempt" -eq 3 ]]; then
+              echo "failed to update registry after 3 attempts" >&2
+              exit 1
+            fi
+          done
