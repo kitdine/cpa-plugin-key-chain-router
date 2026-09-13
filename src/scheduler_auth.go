@@ -83,13 +83,64 @@ func resolveLegacySyntheticAuthIDV10(staleAuthIndex, provider string) (string, e
 	return unique, nil
 }
 
+func liveIDForCandidateV10(c *PolicyCandidate) (string, error) {
+	if c == nil {
+		return "", fmt.Errorf("candidate is nil")
+	}
+	if id := strings.TrimSpace(c.AuthID); id != "" {
+		return id, nil
+	}
+	idx := strings.TrimSpace(c.AuthIndex)
+	if idx == "" {
+		return "", fmt.Errorf("candidate %q has no credential identity", c.Name)
+	}
+	return resolveAuthIDByIndex(idx, c.Provider)
+}
+
+func resourcesWithExactIDsV10() []apiResource {
+	_, resources, _ := currentEnvironment()
+	out := append([]apiResource(nil), resources...)
+	for i := range out {
+		if strings.TrimSpace(out[i].AuthID) != "" || strings.TrimSpace(out[i].AuthIndex) == "" {
+			continue
+		}
+		if id, err := resolveAuthIDByIndex(out[i].AuthIndex, out[i].Provider); err == nil {
+			out[i].AuthID = strings.TrimSpace(id)
+		}
+	}
+	return out
+}
+
+func exactResourceForCandidateV10(c *PolicyCandidate, resources []apiResource) *apiResource {
+	if c == nil {
+		return nil
+	}
+	liveID, _ := liveIDForCandidateV10(c)
+	var matched *apiResource
+	for i := range resources {
+		r := &resources[i]
+		if !strings.EqualFold(strings.TrimSpace(r.Provider), strings.TrimSpace(c.Provider)) {
+			continue
+		}
+		idMatch := liveID != "" && strings.TrimSpace(r.AuthID) == strings.TrimSpace(liveID)
+		idxMatch := strings.TrimSpace(c.AuthIndex) != "" && strings.TrimSpace(r.AuthIndex) == strings.TrimSpace(c.AuthIndex)
+		if !idMatch && !idxMatch {
+			continue
+		}
+		if matched != nil {
+			return nil
+		}
+		matched = r
+	}
+	return matched
+}
+
 func authIDFromEntries(entries []hostAuthEntry, authIndex, provider string) string {
 	authIndex = strings.TrimSpace(authIndex)
 	provider = strings.TrimSpace(provider)
 	if authIndex == "" {
 		return ""
 	}
-
 	matchedID := ""
 	for _, entry := range entries {
 		if strings.TrimSpace(entry.AuthIndex) != authIndex || strings.TrimSpace(entry.ID) == "" {
