@@ -47,6 +47,7 @@ func scopeCandidateModelsV9(candidates []*PolicyCandidate, clientModel string) [
 		}
 
 		prefix := ""
+		var configResource *apiResource
 		if resource := currentConfigResourceForCandidateV9(c, configResources); resource != nil {
 			// Reconcile secret rotation only on the exact persisted config slot.
 			if strings.TrimSpace(resource.AuthIndex) != "" {
@@ -54,6 +55,7 @@ func scopeCandidateModelsV9(candidates []*PolicyCandidate, clientModel string) [
 			}
 			c.ResourceID = resource.ID
 			prefix = strings.Trim(strings.TrimSpace(resource.Prefix), "/")
+			configResource = resource
 		} else if !strings.EqualFold(strings.TrimSpace(c.ResourceKind), "API") {
 			prefix = authFilePrefixV9(c.AuthIndex)
 		}
@@ -68,9 +70,37 @@ func scopeCandidateModelsV9(candidates []*PolicyCandidate, clientModel string) [
 		if model == "" || strings.HasPrefix(model, prefix+"/") {
 			continue
 		}
+
+		// Config credentials with an explicit models list only register prefix
+		// aliases for those models. Never fabricate prefix/arbitrary-model and
+		// assume CPA can route it. An empty list means the provider's default
+		// model set is used, so prefixing remains valid there.
+		if configResource != nil && !configResourceSupportsModelV9(configResource, model) {
+			continue
+		}
 		c.OverrideModel = prefix + "/" + model
 	}
 	return candidates
+}
+
+func configResourceSupportsModelV9(resource *apiResource, model string) bool {
+	if resource == nil {
+		return false
+	}
+	if len(resource.Models) == 0 {
+		return true
+	}
+	model = strings.TrimSpace(model)
+	prefix := strings.Trim(strings.TrimSpace(resource.Prefix), "/")
+	if prefix != "" {
+		model = strings.TrimPrefix(model, prefix+"/")
+	}
+	for _, registered := range resource.Models {
+		if strings.EqualFold(strings.TrimSpace(registered), model) {
+			return true
+		}
+	}
+	return false
 }
 
 func currentConfigResourcesV9() []apiResource {
