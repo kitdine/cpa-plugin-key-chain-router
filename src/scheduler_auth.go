@@ -3,21 +3,24 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 )
 
-// resolveAuthIDByIndex resolves the exact runtime AuthID KCR expects CPA to
-// select. OAuth/file credentials are authoritative in host.auth.list. Config
-// API-key credentials are different: current CPA keeps them as in-memory
-// AuthManager records that are not necessarily exposed by host.auth.list, so a
-// legacy KCR synthetic AuthIndex is bridged by reconstructing CPA's exact
-// current StableID from config.yaml. The caller must still require that returned
-// AuthID to exist in the live SchedulerPickRequest.Candidates set.
+const directLiveIdentityPrefixV10 = "@live-id:"
+
 func resolveAuthIDByIndex(authIndex, provider string) (string, error) {
 	authIndex = strings.TrimSpace(authIndex)
 	provider = strings.TrimSpace(provider)
 	if authIndex == "" {
 		return "", fmt.Errorf("auth index is empty")
+	}
+	if strings.HasPrefix(authIndex, directLiveIdentityPrefixV10) {
+		id := strings.TrimSpace(strings.TrimPrefix(authIndex, directLiveIdentityPrefixV10))
+		if id == "" {
+			return "", fmt.Errorf("direct live identity is empty")
+		}
+		return id, nil
 	}
 
 	var hostErr error
@@ -33,10 +36,7 @@ func resolveAuthIDByIndex(authIndex, provider string) (string, error) {
 		}
 	}
 
-	// KCR <= v0.6.7 synthesized API-provider AuthIndex values from config.yaml.
-	// Reconstruct the exact current CPA Auth.ID here; handleSchedulerPick then
-	// proves that ID is live and selectable by matching it against req.Candidates.
-	legacyID, reconcileErr := resolveLegacySyntheticAuthIDV8(authIndex, provider)
+	legacyID, reconcileErr := resolveLegacySyntheticAuthIDV10(authIndex, provider)
 	if reconcileErr != nil {
 		return "", reconcileErr
 	}
@@ -46,7 +46,41 @@ func resolveAuthIDByIndex(authIndex, provider string) (string, error) {
 	if hostErr != nil {
 		return "", hostErr
 	}
-	return "", fmt.Errorf("auth index %q is neither a host auth file nor a reconcilable config API credential", authIndex)
+	return "", fmt.Errorf("auth index %q is neither a host auth file nor an exactly reconcilable config API credential", authIndex)
+}
+
+func resolveLegacySyntheticAuthIDV10(staleAuthIndex, provider string) (string, error) {
+	staleAuthIndex = strings.TrimSpace(staleAuthIndex)
+	provider = strings.TrimSpace(provider)
+	if staleAuthIndex == "" || provider == "" {
+		return "", nil
+	}
+	runtimeState.RLock()
+	configPath := strings.TrimSpace(runtimeState.configPath)
+	runtimeState.RUnlock()
+	if configPath == "" {
+		return "", nil
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return "", fmt.Errorf("read CPA config for exact identity reconciliation: %w", err)
+	}
+	ids := legacyCurrentRuntimeIDsV8(string(data), staleAuthIndex, provider)
+	unique := ""
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if unique == "" {
+			unique = id
+			continue
+		}
+		if unique != id {
+			return "", fmt.Errorf("legacy API auth index %q maps to multiple current CPA runtime identities", staleAuthIndex)
+		}
+	}
+	return unique, nil
 }
 
 func authIDFromEntries(entries []hostAuthEntry, authIndex, provider string) string {
@@ -93,10 +127,6 @@ func schedulerCandidateEligible(candidates []any, authID, authIndex, provider st
 		if id == "" {
 			id = stringAny(m, "id")
 		}
-
-		// Current CPA SchedulerAuthCandidate exposes the authoritative live Auth.ID
-		// but not AuthIndex. Once an AuthID has been resolved, only exact ID
-		// membership proves that this is the credential KCR intended to pin.
 		if authID != "" {
 			if strings.TrimSpace(id) != authID {
 				continue
@@ -110,7 +140,6 @@ func schedulerCandidateEligible(candidates []any, authID, authIndex, provider st
 				continue
 			}
 		}
-
 		candidateProvider := stringAny(m, "Provider")
 		if candidateProvider == "" {
 			candidateProvider = stringAny(m, "provider")
