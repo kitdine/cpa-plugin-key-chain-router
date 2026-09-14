@@ -28,6 +28,7 @@ func isRoutingControlFailureV8(err error) bool {
 		"kcr pinned credential is not eligible in the current cpa candidate set",
 		"kcr scheduler did not claim execution ticket",
 		"kcr failed to issue execution ticket",
+		"kcr managed priority:",
 	} {
 		if strings.Contains(msg, marker) {
 			return true
