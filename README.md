@@ -58,23 +58,37 @@ Rule 匹配优先级：
 
 ## Credential 定位与调度
 
-KCR state 保存的是稳定的 `AuthIndex`，不会把运行时 `AuthID` 当作持久标识。
+v0.7 起，KCR 明确区分 **持久 identity**、**CPA live Auth.ID** 与 **本次 scheduler eligibility**。
+
+新建或重新保存的 Policy 会在能够精确解析时持久化当前 live `auth_id`，同时保留 `AuthIndex` 作为兼容/迁移信息。旧 Policy 仍可通过历史 identity 算法精确还原当前 CPA live Auth.ID；无法唯一证明同一 credential 时 fail closed，不按 config 数组位置、provider 或 base URL 猜测替代 key。
 
 实际调度路径：
 
 ```text
-Policy Candidate AuthIndex
+Policy Candidate
+  → 精确解析当前 live Auth.ID
+  → 如该 credential 已有 CPA prefix 且目标 model 已注册：使用 prefix/model 缩小 provider/credential 范围
   → X-CPA-Key-Chain-Ticket
   → scheduler.pick
-  → 验证目标仍存在于 CPA 本次 Candidates
-  → host.auth.list
-  → AuthIndex + Provider 唯一解析当前真实 files[].id
+  → 验证 exact live Auth.ID 确实存在于 CPA 本次 Candidates
   → 返回 AuthID
 ```
 
-如果目标 credential 已被 CPA 从当前 `Candidates` 排除，例如 cooldown、不可用或不符合当前 provider/model，则 KCR 不会通过 `host.auth.list` 绕过这一资格判断。
+### CPA priority / cooldown 预过滤与 KCR Priority 的区别
 
-如果同一 `AuthIndex + Provider` 无法唯一映射到一个 AuthID，也会 fail closed，而不是任意选择其中一个。
+KCR `Priority` 只决定 **KCR Rule 内候选顺序**；CPA credential 自身的 priority、cooldown、disabled/unavailable 状态属于 CPA 的更前置 eligibility 层。
+
+当前 CPA plugin ABI 的 `HostModelExecutionRequest` 没有 per-request `forced_provider` / `auth_id` hard-pin 字段，而且 plugin scheduler 收到的是 CPA 已完成 eligibility 与 credential-priority 预过滤后的 `Candidates`。因此 KCR **不会**通过临时修改全局 CPA credential priority 来绕过这一层，因为那会污染其他并发请求。
+
+v0.7 的处理方式：
+
+- credential 已配置唯一 `prefix` 且该 model 已注册时，KCR 在 nested execution 前自动使用 `prefix/model`，先把 provider/credential 范围缩到目标 credential，再由 ticket 验证 exact Auth.ID。
+- failover 到另一 prefix credential 时会替换已有 credential prefix，不生成 `bar/foo/model`。
+- 不为未注册 model 伪造 prefix alias。
+- credential 无 prefix 时仍使用 exact Auth.ID scheduler pin；如果 CPA 已把目标 credential 预过滤掉，会明确报 `pinned credential is not eligible in the current CPA candidate set` 并按 KCR Failover 规则继续，而不是静默使用另一 credential。
+- `scheduler did not claim execution ticket` 表示 KCR 没有取得本次 nested execution 的 scheduler ownership；这类情况直接 fail closed，避免重复请求和错误归因。
+
+诊断页会展示 live `auth_id`、实际 `execution_model`、credential prefix、identity 解析错误与 scope 提示，便于区分 KCR candidate 顺序和 CPA prefilter。
 
 ## 调度策略
 
@@ -286,7 +300,7 @@ checksums.txt
 3. 给 Policy 添加按 Model 匹配的 Rule。
 4. 为 Rule 添加 OAuth / API credential 候选。
 5. 设置 Strategy、Priority / Weight、Failover 和可选 Override Model。
-6. 保存后通过诊断页检查 Rule 命中和候选关系。
+6. 保存后通过诊断页检查 Rule 命中、live Auth.ID、execution model / prefix scope，以及是否存在 CPA prefilter 风险。
 7. 在“路由记录”中观察最终候选、Attempts 和选择原因。
 
 配置示例见：
@@ -299,8 +313,9 @@ config.example.yaml
 
 - KCR 不接管 CPA 下游认证；API Key 必须仍存在于 CPA 原生 `api-keys`。
 - State 只保存下游 Key 的 SHA-256 fingerprint / hint，不保存明文 Key。
-- Credential 选择通过一次性内部 ticket 完成。
-- 无法唯一解析 AuthID 时 fail closed。
+- Credential 选择通过一次性内部 ticket 完成，并以本次 scheduler Candidates 中的 exact live Auth.ID 做最终验证。
+- 无法唯一解析 live Auth.ID 时 fail closed，不按 slot 或相似配置猜测替代 credential。
+- KCR 不通过临时修改 CPA 全局 credential priority 绕过预过滤。
 - 管理资源页应只暴露在可信网络。
 - Memory / SQLite / logging 等可观测性故障不得影响模型路由。
 

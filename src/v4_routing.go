@@ -125,6 +125,7 @@ func handleExecuteV4(raw []byte, streaming bool) ([]byte, error) {
 	trace := traceIDV4()
 	started := time.Now()
 	ranked := rankCandidatesV4(p, rule, headers, metadata)
+	ranked = scopeCandidateModelsV9(ranked, model)
 	if streaming {
 		go runStreamPolicyV4(trace, p, rule, ranked, source, model, body, headers, query, alt, callbackID, streamID, started)
 		outHeaders := http.Header{"Content-Type": []string{"text/event-stream"}}
