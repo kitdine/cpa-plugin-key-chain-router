@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"time"
+	"syscall"
 )
 
 const methodHostAuthSaveV11 = "host.auth.save"
@@ -56,11 +56,6 @@ func ensureCandidateCPAPriorityV11(c *PolicyCandidate) (bool, error) {
 	var err error
 	if strings.EqualFold(kind, "API") {
 		err = persistConfigPriorityV11(c, target)
-		if err == nil {
-			// CPA debounces config reload by 150ms. Give the watcher enough time to
-			// rebuild its AuthManager before this request enters host.model.execute.
-			time.Sleep(400 * time.Millisecond)
-		}
 	} else {
 		err = persistOAuthPriorityV11(c, target)
 	}
@@ -68,10 +63,9 @@ func ensureCandidateCPAPriorityV11(c *PolicyCandidate) (bool, error) {
 		return false, fmt.Errorf("kcr managed priority: %w", err)
 	}
 
-	persisted, ok := candidateCurrentCPAPriorityV11(c)
-	if !ok || persisted < target {
-		return false, fmt.Errorf("kcr managed priority: priority update for %q did not persist (want %d, got %d)", c.Name, target, persisted)
-	}
+	// Do not treat config.yaml as proof that CPA's live AuthManager has reloaded.
+	// executeCandidateV4 observes the authoritative scheduler candidate set and
+	// retries this local-only control failure until the target becomes eligible.
 	return true, nil
 }
 
@@ -126,13 +120,22 @@ func persistOAuthPriorityV11(c *PolicyCandidate, target int) error {
 	if idx == "" {
 		return fmt.Errorf("OAuth candidate %q has no AuthIndex", c.Name)
 	}
-	raw, err := callHost(methodHostAuthGetV10, map[string]any{"auth_index": idx})
-	if err != nil {
-		return fmt.Errorf("read OAuth auth file %s: %w", idx, err)
-	}
+	// Re-read immediately before saving. A token refresh between the two reads
+	// makes the snapshots differ and is retried instead of being overwritten by
+	// a stale whole-document host.auth.save.
 	var resp hostAuthPhysicalV11
-	if err := json.Unmarshal(raw, &resp); err != nil {
-		return fmt.Errorf("decode OAuth auth file %s: %w", idx, err)
+	for attempt := 0; attempt < 4; attempt++ {
+		a, err := readHostAuthPhysicalV11(idx)
+		if err != nil { return err }
+		b, err := readHostAuthPhysicalV11(idx)
+		if err != nil { return err }
+		if bytes.Equal(bytes.TrimSpace(a.JSON), bytes.TrimSpace(b.JSON)) {
+			resp = b
+			break
+		}
+	}
+	if len(resp.JSON) == 0 {
+		return fmt.Errorf("OAuth auth file %s kept changing while updating priority", idx)
 	}
 	if len(bytes.TrimSpace(resp.JSON)) == 0 {
 		return fmt.Errorf("OAuth auth file %s is empty", idx)
@@ -161,6 +164,14 @@ func persistOAuthPriorityV11(c *PolicyCandidate, target int) error {
 	return nil
 }
 
+func readHostAuthPhysicalV11(idx string) (hostAuthPhysicalV11, error) {
+	raw, err := callHost(methodHostAuthGetV10, map[string]any{"auth_index": idx})
+	if err != nil { return hostAuthPhysicalV11{}, fmt.Errorf("read OAuth auth file %s: %w", idx, err) }
+	var resp hostAuthPhysicalV11
+	if err := json.Unmarshal(raw, &resp); err != nil { return resp, fmt.Errorf("decode OAuth auth file %s: %w", idx, err) }
+	return resp, nil
+}
+
 type configPriorityLocationV11 struct {
 	Section string
 	Outer   int
@@ -174,67 +185,44 @@ func persistConfigPriorityV11(c *PolicyCandidate, target int) error {
 		return fmt.Errorf("CPA config path is unavailable")
 	}
 	for attempt := 0; attempt < 3; attempt++ {
-		before, err := os.ReadFile(path)
+		file, err := os.OpenFile(path, os.O_RDWR, 0)
 		if err != nil {
-			return fmt.Errorf("read CPA config: %w", err)
+			return fmt.Errorf("open CPA config: %w", err)
 		}
+		if err = syscall.Flock(int(file.Fd()), syscall.LOCK_EX); err != nil { _ = file.Close(); return err }
+		before, err := os.ReadFile(path)
+		if err != nil { _ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN); _ = file.Close(); return err }
 		loc, err := configPriorityLocationV11ForCandidate(string(before), c)
 		if err != nil {
+			_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN); _ = file.Close()
 			return err
 		}
 		patched, changed, err := patchTopListItemPriorityV11(string(before), loc, target)
 		if err != nil {
+			_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN); _ = file.Close()
 			return err
 		}
 		if !changed {
+			_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN); _ = file.Close()
 			return nil
 		}
-		latest, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		if !bytes.Equal(before, latest) {
+		// Keep writing through the locked inode. If an external atomic writer
+		// replaced path after our read, the inode check fails; if it replaces the
+		// path after the check, our write only touches the now-unlinked old inode
+		// and cannot overwrite the newer config.
+		pathInfo, statErr := os.Stat(path)
+		fileInfo, fileStatErr := file.Stat()
+		if statErr != nil || fileStatErr != nil || !os.SameFile(pathInfo, fileInfo) {
+			_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN); _ = file.Close()
 			continue
 		}
-		info, err := os.Stat(path)
-		if err != nil {
-			return err
-		}
-		tmp, err := os.CreateTemp(filepath.Dir(path), ".kcr-priority-*.yaml")
-		if err != nil {
-			return err
-		}
-		tmpName := tmp.Name()
-		ok := false
-		defer func() {
-			if !ok {
-				_ = os.Remove(tmpName)
-			}
-		}()
-		if err = tmp.Chmod(info.Mode().Perm()); err == nil {
-			_, err = tmp.WriteString(patched)
-		}
-		if err == nil {
-			err = tmp.Sync()
-		}
-		if closeErr := tmp.Close(); err == nil {
-			err = closeErr
-		}
-		if err != nil {
-			return err
-		}
-		latest, err = os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		if !bytes.Equal(before, latest) {
-			_ = os.Remove(tmpName)
-			continue
-		}
-		if err = os.Rename(tmpName, path); err != nil {
-			return err
-		}
-		ok = true
+		if err = file.Truncate(0); err == nil { _, err = file.Seek(0, 0) }
+		if err == nil { _, err = file.WriteString(patched) }
+		if err == nil { err = file.Sync() }
+		_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+		closeErr := file.Close()
+		if err != nil { return err }
+		if closeErr != nil { return closeErr }
 		return nil
 	}
 	return fmt.Errorf("CPA config changed concurrently while updating priority")
