@@ -7,6 +7,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -73,14 +74,24 @@ func moveCandidateFirstV4(xs []*PolicyCandidate, id string) []*PolicyCandidate {
 
 func executeCandidateV4(c *PolicyCandidate, source, clientModel string, body []byte, headers http.Header, query url.Values, alt, callbackID string, stream bool) (hostModelExecutionResponse, attemptResult, error) {
 	started := time.Now()
-	if _, priorityErr := ensureCandidateCPAPriorityV11(c); priorityErr != nil {
-		model := clientModel
-		if c != nil && c.OverrideModel != "" { model = c.OverrideModel }
-		ar := attemptResult{Candidate: c.Name, Provider: c.Provider, AuthIndex: c.AuthIndex, Model: model, Duration: time.Since(started), Error: priorityErr.Error()}
-		ar.DurationMs = ar.Duration.Milliseconds()
-		ar.Status = statusFromError(priorityErr)
-		return hostModelExecutionResponse{}, ar, priorityErr
+	deadline := started.Add(3 * time.Second)
+	for {
+		if _, priorityErr := ensureCandidateCPAPriorityV11(c); priorityErr != nil {
+			return managedPriorityAttemptFailureV11(c, clientModel, started, priorityErr)
+		}
+		resp, ar, err := executeCandidateOnceV11(c, source, clientModel, body, headers, query, alt, callbackID, stream, started)
+		if err == nil || !isCandidateNotEligibleV11(err) || time.Now().After(deadline) {
+			return resp, ar, err
+		}
+		// scheduler.pick is the authoritative, observable live-AuthManager check.
+		// An ineligible result occurs before any upstream request is sent, so it is
+		// safe to retry while CPA's config watcher catches up. Re-running ensure on
+		// every pass also observes a concurrently raised provider maximum.
+		time.Sleep(50 * time.Millisecond)
 	}
+}
+
+func executeCandidateOnceV11(c *PolicyCandidate, source, clientModel string, body []byte, headers http.Header, query url.Values, alt, callbackID string, stream bool, started time.Time) (hostModelExecutionResponse, attemptResult, error) {
 	model, _ := candidateScopedModelV10(c, clientModel)
 	h := cloneHeader(headers)
 	h.Del(ticketHeader)
@@ -117,6 +128,19 @@ func executeCandidateV4(c *PolicyCandidate, source, clientModel string, body []b
 	if e := json.Unmarshal(raw, &resp); e != nil { ar.Error = e.Error(); return resp, ar, e }
 	ar.Status = resp.StatusCode
 	return resp, ar, nil
+}
+
+func isCandidateNotEligibleV11(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "kcr pinned credential is not eligible in the current cpa candidate set")
+}
+
+func managedPriorityAttemptFailureV11(c *PolicyCandidate, clientModel string, started time.Time, err error) (hostModelExecutionResponse, attemptResult, error) {
+	model := clientModel
+	if c != nil && c.OverrideModel != "" { model = c.OverrideModel }
+	ar := attemptResult{Model: model, Duration: time.Since(started), Error: err.Error()}
+	if c != nil { ar.Candidate, ar.Provider, ar.AuthIndex = c.Name, c.Provider, c.AuthIndex }
+	ar.DurationMs, ar.Status = ar.Duration.Milliseconds(), statusFromError(err)
+	return hostModelExecutionResponse{}, ar, err
 }
 
 func executeCPADefaultV4(event RoutingEvent, source, clientModel string, body []byte, headers http.Header, query url.Values, alt, callbackID string, started time.Time) (hostModelExecutionResponse, RoutingEvent, error) {
