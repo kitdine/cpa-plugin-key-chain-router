@@ -14,7 +14,12 @@ import (
 
 const methodHostAuthSaveV11 = "host.auth.save"
 
-var managedPriorityMuV11 sync.Mutex
+var managedPriorityLocksV11 sync.Map
+
+func managedPriorityLockV11(provider string) *sync.Mutex {
+	lock, _ := managedPriorityLocksV11.LoadOrStore(strings.ToLower(strings.TrimSpace(provider)), &sync.Mutex{})
+	return lock.(*sync.Mutex)
+}
 
 // ensureCandidateCPAPriorityV11 fixes the one CPA selector constraint KCR cannot
 // override from scheduler.pick: plugins only receive the highest currently
@@ -31,9 +36,6 @@ func ensureCandidateCPAPriorityV11(c *PolicyCandidate) (bool, error) {
 		return false, nil
 	}
 
-	managedPriorityMuV11.Lock()
-	defer managedPriorityMuV11.Unlock()
-
 	target, targetOK := providerMaxCPAPriorityV11(c.Provider)
 	if !targetOK {
 		return false, fmt.Errorf("kcr managed priority: cannot determine CPA priority tier for provider %q", c.Provider)
@@ -45,6 +47,20 @@ func ensureCandidateCPAPriorityV11(c *PolicyCandidate) (bool, error) {
 	if current >= target {
 		return false, nil
 	}
+
+	// Only serialize actual writes for the same provider. The steady-state path
+	// above stays lock-free, and unrelated providers cannot block each other.
+	lock := managedPriorityLockV11(c.Provider)
+	lock.Lock()
+	defer lock.Unlock()
+	// Another request or administrator may have changed priorities while this
+	// request was waiting. Recompute both sides under the provider write lock.
+	target, targetOK = providerMaxCPAPriorityV11(c.Provider)
+	current, currentOK = candidateCurrentCPAPriorityV11(c)
+	if !targetOK || !currentOK {
+		return false, fmt.Errorf("kcr managed priority: CPA priority snapshot for provider %q is incomplete", c.Provider)
+	}
+	if current >= target { return false, nil }
 
 	resources := resourcesWithExactIDsV10()
 	resource := exactResourceForCandidateV10(c, resources)
@@ -88,7 +104,9 @@ func providerMaxCPAPriorityV11(provider string) (int, bool) {
 		}
 		priority, ok := candidateCurrentCPAPriorityV11(probe)
 		if !ok {
-			continue
+			// A partial provider snapshot cannot prove the real highest tier.
+			// Fail closed and retry later instead of aligning to a false maximum.
+			return 0, false
 		}
 		if !known || priority > maxPriority {
 			maxPriority = priority
