@@ -117,5 +117,17 @@ func TestManagedPriorityControlFailureDoesNotPoisonCandidateHealth(t *testing.T)
 	}
 }
 
+func TestCandidateNotEligibleV11OnlyRetriesProvenLocalPrefilterFailure(t *testing.T) {
+	if !isCandidateNotEligibleV11(&managedPriorityTextError{"HOST: KCR pinned credential is not eligible in the current CPA candidate set"}) {
+		t.Fatal("expected exact pre-scheduler eligibility failure to be retryable")
+	}
+	if isCandidateNotEligibleV11(errSchedulerTicketUnclaimed) {
+		t.Fatal("scheduler ownership loss may have reached another scheduler and must not be retried")
+	}
+}
+
 type managedPriorityTestError struct{}
 func (*managedPriorityTestError) Error() string { return "kcr managed priority: test failure" }
+
+type managedPriorityTextError struct{ text string }
+func (e *managedPriorityTextError) Error() string { return e.text }
