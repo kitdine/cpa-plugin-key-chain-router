@@ -72,8 +72,16 @@ func moveCandidateFirstV4(xs []*PolicyCandidate, id string) []*PolicyCandidate {
 }
 
 func executeCandidateV4(c *PolicyCandidate, source, clientModel string, body []byte, headers http.Header, query url.Values, alt, callbackID string, stream bool) (hostModelExecutionResponse, attemptResult, error) {
-	model, _ := candidateScopedModelV10(c, clientModel)
 	started := time.Now()
+	if _, priorityErr := ensureCandidateCPAPriorityV11(c); priorityErr != nil {
+		model := clientModel
+		if c != nil && c.OverrideModel != "" { model = c.OverrideModel }
+		ar := attemptResult{Candidate: c.Name, Provider: c.Provider, AuthIndex: c.AuthIndex, Model: model, Duration: time.Since(started), Error: priorityErr.Error()}
+		ar.DurationMs = ar.Duration.Milliseconds()
+		ar.Status = statusFromError(priorityErr)
+		return hostModelExecutionResponse{}, ar, priorityErr
+	}
+	model, _ := candidateScopedModelV10(c, clientModel)
 	h := cloneHeader(headers)
 	h.Del(ticketHeader)
 	ticket := ""
