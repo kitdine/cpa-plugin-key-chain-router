@@ -53,7 +53,8 @@ jobs:
           nm -D "dist/key-chain-router-v${VERSION}.so" | grep -E 'cliproxy_plugin_init|keyChainRouterPluginCall|keyChainRouterPluginFree|keyChainRouterPluginShutdown'
           ldd "dist/key-chain-router-v${VERSION}.so"
 
-      - name: Package artifact
+      - name: Package manual artifact
+        if: github.event_name == 'workflow_dispatch'
         shell: bash
         run: |
           VERSION="$(tr -d '[:space:]' < VERSION)"
@@ -64,10 +65,11 @@ jobs:
           (cd package && sha256sum "key-chain-router-v${VERSION}.so" key-chain-router.so > SHA256SUMS)
           tar -C package -czf "key-chain-router-v${VERSION}-linux-amd64.tar.gz" .
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload manual artifact
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
         with:
           name: key-chain-router-linux-amd64
-          path: |
-            package/
-            key-chain-router-v*-linux-amd64.tar.gz
+          path: key-chain-router-v*-linux-amd64.tar.gz
           if-no-files-found: error
+          retention-days: 3
