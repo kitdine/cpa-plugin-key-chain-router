@@ -77,12 +77,6 @@ jobs:
           (cd release/store && zip -q "../key-chain-router_${VERSION}_linux_amd64.zip" "key-chain-router-v${VERSION}.so")
           (cd release && sha256sum "key-chain-router_${VERSION}_linux_amd64.zip" > checksums.txt)
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: key-chain-router-v${{ steps.version.outputs.version }}
-          path: release/
-          if-no-files-found: error
-
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
