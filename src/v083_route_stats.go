@@ -209,7 +209,11 @@ func aggregateRouteStatsV83(rows []routeStatRowV83, q url.Values, source string)
 		candidates = candidates[:12]
 	}
 
-	fallbackPaths := countersFromMapV83(paths, fallback)
+	pathTotal := 0
+	for _, count := range paths {
+		pathTotal += count
+	}
+	fallbackPaths := countersFromMapV83(paths, pathTotal)
 	if len(fallbackPaths) > 10 {
 		fallbackPaths = fallbackPaths[:10]
 	}
