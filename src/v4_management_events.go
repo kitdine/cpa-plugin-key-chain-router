@@ -18,6 +18,7 @@ func queryEventsV4(q url.Values) map[string]any {
 	v4Runtime.RUnlock()
 
 	limit := parseEventLimitV6(q.Get("limit"))
+	offset := parseEventOffsetV83(q.Get("offset"))
 	search := strings.ToLower(strings.TrimSpace(q.Get("q")))
 	decision := strings.TrimSpace(q.Get("decision"))
 	success := strings.TrimSpace(q.Get("success"))
@@ -29,6 +30,7 @@ func queryEventsV4(q url.Values) map[string]any {
 	cutoff := eventCutoffV6(strings.TrimSpace(q.Get("since")))
 
 	events := make([]RoutingEvent, 0, minV6(limit, len(recent)))
+	matchedIndex := 0
 	durations := make([]int64, 0, len(recent))
 	totalAttempts := 0
 	windowTotal := 0
@@ -83,9 +85,10 @@ func queryEventsV4(q url.Values) map[string]any {
 		}
 		totalAttempts += len(ev.Attempts)
 
-		if len(events) < limit {
+		if matchedIndex >= offset && len(events) < limit {
 			events = append(events, ev)
 		}
+		matchedIndex++
 	}
 
 	total := stats["total"].(int)
@@ -140,6 +143,17 @@ func parseEventLimitV6(raw string) int {
 	}
 	if n > 1000 {
 		return 1000
+	}
+	return n
+}
+
+func parseEventOffsetV83(raw string) int {
+	n, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || n < 0 {
+		return 0
+	}
+	if n > 10000000 {
+		return 10000000
 	}
 	return n
 }
