@@ -41,6 +41,7 @@ type Policy struct {
 	Name           string        `json:"name"`
 	KeyFingerprint string        `json:"key_fingerprint"`
 	ClientAffinity string        `json:"client_affinity,omitempty"`
+	ClientType     string        `json:"client_type,omitempty"`
 	ClientProvider string        `json:"client_provider,omitempty"`
 	KeyHint        string        `json:"key_hint"`
 	Enabled        bool          `json:"enabled"`
