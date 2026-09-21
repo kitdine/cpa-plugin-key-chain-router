@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.8.0 - 2026-09-21
+
+新增 Client Affinity v1，使 Policy 可以显式约束原生 API Provider，同时继续允许 OAuth 资源参与候选链。
+
+### Client Affinity
+
+- 新增 `off` / `strict` 两种模式；现有 Policy 默认保持 `off`，不改变既有路由行为。
+- `strict` 模式绑定一个客户端 Provider：只允许该 Provider 的原生 API 资源，同时允许全部 OAuth credential。
+- UI 根据 Affinity 动态过滤可选资源，并保留暂时不可见或当前不允许的已有候选，避免编辑时静默丢失 failover chain。
+- OAuth-only 部署也可以选择对应 Provider；已有 Provider 暂时从 live resources 消失时仍保留原配置，不会自动切换。
+- `cpa-default` Rule 不参与 Affinity candidate 校验，因为该 Rule 不执行候选链。
+
+### Fail-closed 与兼容性
+
+- 保存时拒绝未知/预留的非空 Affinity 模式，避免拼写错误或未来值被静默降级为 `off`。
+- 运行时对未知 persisted Affinity 模式 fail closed，不允许 candidate execution，也不会回退到 CPA unrestricted default routing。
+- 管理页显式展示当前版本不支持的 Affinity 值；用户必须明确选择受支持模式后才能迁移配置。
+- 旧 state 中缺失的 Affinity 字段仍归一化为 `off`，保持向后兼容。
+
+### 测试与发布
+
+- 新增 Client Affinity strict / off / unknown-mode 回归测试。
+- PR #32 通过 Go test、Go vet、JavaScript syntax、Linux amd64 c-shared build、ABI smoke、binary inspection 与 artifact packaging。
+
+关联：PR #32。
+
 ## v0.7.1 - 2026-09-21
 
 恢复基于 CPA 原生 request-scoped exact AuthID 的 credential 执行，不再依赖 prefix / 同一 CPA credential priority 才能完成 ordered failover。
