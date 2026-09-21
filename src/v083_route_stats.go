@@ -82,7 +82,7 @@ func routeStatRowsSQLiteV83(q url.Values) ([]routeStatRowV83, bool) {
 		return nil, false
 	}
 
-	where, args := sqliteWhereV62(q)
+	where, args := routeStatsSQLiteWhereV83(q)
 	rows, err := sink.db.Query(`SELECT
 		COALESCE(routing_events.trace_id,''), COALESCE(routing_events.at,''), COALESCE(routing_events.decision,''),
 		COALESCE(routing_events.reason,''), COALESCE(routing_events.policy_name,''), COALESCE(routing_events.model,''),
@@ -127,6 +127,28 @@ func routeStatRowsSQLiteV83(q url.Values) ([]routeStatRowV83, bool) {
 		return nil, false
 	}
 	return out, true
+}
+
+func routeStatsSQLiteWhereV83(q url.Values) (string, []any) {
+	clauses := []string{`COALESCE(routing_events.reason,'') <> 'no_policy'`}
+	args := []any{}
+	if cutoff := eventCutoffV6(strings.TrimSpace(q.Get("since"))); !cutoff.IsZero() {
+		clauses = append(clauses, `routing_events.at >= ?`)
+		args = append(args, cutoff.Format(time.RFC3339Nano))
+	}
+	if v := strings.TrimSpace(q.Get("policy")); v != "" && v != "all" {
+		clauses = append(clauses, `LOWER(COALESCE(routing_events.policy_name,'')) = LOWER(?)`)
+		args = append(args, v)
+	}
+	if v := strings.TrimSpace(q.Get("model")); v != "" && v != "all" {
+		clauses = append(clauses, `LOWER(COALESCE(routing_events.model,'')) = LOWER(?)`)
+		args = append(args, v)
+	}
+	if v := strings.TrimSpace(q.Get("provider")); v != "" && v != "all" {
+		clauses = append(clauses, `(LOWER(COALESCE(routing_events.provider,'')) = LOWER(?) OR EXISTS (SELECT 1 FROM routing_attempts fa WHERE fa.trace_id=routing_events.trace_id AND LOWER(COALESCE(fa.provider,'')) = LOWER(?)))`)
+		args = append(args, v, v)
+	}
+	return " WHERE " + strings.Join(clauses, " AND "), args
 }
 
 func aggregateRouteStatsV83(rows []routeStatRowV83, q url.Values, source string) map[string]any {
