@@ -79,7 +79,7 @@ func executeCandidateV4(c *PolicyCandidate, source, clientModel string, body []b
 	ticket := ""
 	authID, err := liveIDForCandidateV10(c)
 	if err != nil {
-		err = fmt.Errorf("kcr exact auth pin resolution failed: %w", err)
+		err = fmt.Errorf("%w: exact auth pin: %w", errKCRAuthResolution, err)
 	} else if authID == "" {
 		err = errSchedulerTicketIssue
 	} else {
