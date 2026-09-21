@@ -18,6 +18,8 @@ func handleAPIV4(req managementRequest) (map[string]any, error) {
 		return buildSnapshotV4(), nil
 	case "events":
 		return queryEventsV4(req.Query), nil
+	case "route_stats":
+		return queryRouteStatsV83(req.Query), nil
 	case "save_policy":
 		payload := payloadV4(req)
 		if len(payload) == 0 {
