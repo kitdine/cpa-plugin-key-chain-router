@@ -15,10 +15,31 @@ func normalizeClientAffinityV1(p *Policy) {
 	if p.ClientAffinity == "" {
 		p.ClientAffinity = clientAffinityOff
 	}
+	p.ClientType = strings.ToLower(strings.TrimSpace(p.ClientType))
 	p.ClientProvider = strings.ToLower(strings.TrimSpace(p.ClientProvider))
-	if p.ClientAffinity == clientAffinityOff {
+
+	// v0.8.0 stored the client identity in client_provider only when strict.
+	// Preserve that state while moving the editor model to an independent
+	// client_type field.
+	if p.ClientType == "" && p.ClientProvider != "" {
+		p.ClientType = p.ClientProvider
+	}
+	if p.ClientAffinity == clientAffinityStrict {
+		p.ClientProvider = p.ClientType
+	} else if p.ClientAffinity == clientAffinityOff {
+		// Client type remains useful policy metadata even when affinity is off.
 		p.ClientProvider = ""
 	}
+}
+
+func effectiveClientProviderV81(p *Policy) string {
+	if p == nil {
+		return ""
+	}
+	if v := strings.ToLower(strings.TrimSpace(p.ClientType)); v != "" {
+		return v
+	}
+	return strings.ToLower(strings.TrimSpace(p.ClientProvider))
 }
 
 func candidateAllowedByClientAffinityV1(p *Policy, c *PolicyCandidate) bool {
@@ -34,7 +55,8 @@ func candidateAllowedByClientAffinityV1(p *Policy, c *PolicyCandidate) bool {
 	if strings.EqualFold(strings.TrimSpace(c.ResourceKind), "OAuth") {
 		return true
 	}
-	return p.ClientProvider != "" && strings.EqualFold(strings.TrimSpace(c.Provider), p.ClientProvider)
+	provider := effectiveClientProviderV81(p)
+	return provider != "" && strings.EqualFold(strings.TrimSpace(c.Provider), provider)
 }
 
 func filterCandidatesByClientAffinityV1(p *Policy, xs []*PolicyCandidate) []*PolicyCandidate {
