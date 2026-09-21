@@ -133,6 +133,20 @@ func (e *hostCallbackError) StatusCode() int {
 	return e.HTTPStatus
 }
 
+func isNativeExactPinSelectionError(err error) bool {
+	var hostErr *hostCallbackError
+	if !errors.As(err, &hostErr) || hostErr == nil {
+		return false
+	}
+	// Current CPA turns auth-manager selection failures that happen before any
+	// provider dispatch into this exact host callback envelope. Keep this narrow:
+	// any other unclaimed host error remains an ownership failure to avoid
+	// retrying a request that may already have reached an upstream.
+	return hostErr.Code == "host_call_failed" &&
+		hostErr.HTTPStatus == http.StatusServiceUnavailable &&
+		strings.TrimSpace(hostErr.Message) == "no auth available"
+}
+
 type lifecycleRequest struct {
 	ConfigYAML    []byte `json:"config_yaml"`
 	SchemaVersion uint32 `json:"schema_version"`
