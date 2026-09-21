@@ -3,7 +3,7 @@ package main
 import "testing"
 
 func TestClientAffinityStrictAllowsNativeAPIAndAllOAuth(t *testing.T) {
-	p := &Policy{ClientAffinity: clientAffinityStrict, ClientProvider: "claude"}
+	p := &Policy{ClientAffinity: clientAffinityStrict, ClientType: "claude"}
 	cases := []struct {
 		c    *PolicyCandidate
 		want bool
@@ -38,5 +38,24 @@ func TestClientAffinityUnknownModeFailsClosed(t *testing.T) {
 		if candidateAllowedByClientAffinityV1(p, candidate) {
 			t.Fatalf("unknown affinity unexpectedly allowed candidate %+v", candidate)
 		}
+	}
+}
+
+func TestClientTypePersistsWhenAffinityOff(t *testing.T) {
+	p := &Policy{ClientAffinity: clientAffinityOff, ClientType: "claude", ClientProvider: "claude"}
+	normalizeClientAffinityV1(p)
+	if p.ClientType != "claude" {
+		t.Fatalf("client type = %q, want claude", p.ClientType)
+	}
+	if p.ClientProvider != "" {
+		t.Fatalf("client provider = %q, want empty when affinity off", p.ClientProvider)
+	}
+}
+
+func TestV080StrictProviderMigratesToClientType(t *testing.T) {
+	p := &Policy{ClientAffinity: clientAffinityStrict, ClientProvider: "claude"}
+	normalizeClientAffinityV1(p)
+	if p.ClientType != "claude" || p.ClientProvider != "claude" {
+		t.Fatalf("migration failed: %+v", p)
 	}
 }
