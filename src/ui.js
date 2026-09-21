@@ -231,10 +231,19 @@ function renderCands(r, ri) {
     f.weight ? '1.5fr 1.1fr 90px 1.2fr 105px' : '1.5fr 1.1fr 1.2fr 105px';
   return (r.candidates || []).map((c, ci) => {
     const resource = (SNAP.resources || []).find((x) => x.id === c.resource_id);
-    const allowed = !resource || resourceAllowedByAffinity(resource);
-    const options = allowed ? resOptions(c.resource_id) : '<option value="' + esc(c.resource_id || '') + '" selected>' + esc(c.name || c.provider || '当前候选') + ' · 当前 Affinity 不允许</option>' + resOptions('');
-    return '<div class="candidate" style="grid-template-columns:' + cols + ';' + (allowed ? '' : 'opacity:.65') + '">' +
-    '<div><label>上游资源</label><select onchange="pickRes(' + ri + ',' + ci + ',this.value)">' + options + '</select>' + (allowed ? '' : '<div class="warn small">保存 Strict Policy 前请更换或删除此候选</div>') + '</div>' +
+    const missing = !resource;
+    const allowed = !missing && resourceAllowedByAffinity(resource);
+    let options = resOptions(c.resource_id);
+    let warning = '';
+    if (missing) {
+      options = '<option value="' + esc(c.resource_id || '') + '" selected>' + esc(c.name || c.provider || '当前候选') + ' · 当前资源中不可见</option>' + resOptions('');
+      warning = '<div class="warn small">当前资源不可见；保持原配置，选择其他资源后才会替换</div>';
+    } else if (!allowed) {
+      options = '<option value="' + esc(c.resource_id || '') + '" selected>' + esc(c.name || c.provider || '当前候选') + ' · 当前 Affinity 不允许</option>' + resOptions('');
+      warning = '<div class="warn small">保存 Strict Policy 前请更换或删除此候选</div>';
+    }
+    return '<div class="candidate" style="grid-template-columns:' + cols + ';' + (missing || !allowed ? 'opacity:.65' : '') + '">' +
+    '<div><label>上游资源</label><select onchange="pickRes(' + ri + ',' + ci + ',this.value)">' + options + '</select>' + warning + '</div>' +
     '<div><label>显示名称</label><input value="' + esc(c.name || '') + '" oninput="EDIT.rules[' + ri + '].candidates[' + ci + '].name=this.value"></div>' +
     (f.priority ? '<div><label>Priority</label><input type="number" value="' + (c.priority || 100) + '" oninput="EDIT.rules[' + ri + '].candidates[' + ci + '].priority=+this.value||100"></div>' : '') +
     (f.weight ? '<div><label>Weight</label><input type="number" min="1" value="' + (c.weight || 1) + '" oninput="EDIT.rules[' + ri + '].candidates[' + ci + '].weight=+this.value||1"></div>' : '') +
