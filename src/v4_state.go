@@ -256,6 +256,9 @@ func validatePolicy(p *Policy) error {
 		return errors.New("请选择下游 CPA API Key")
 	}
 	normalizeClientAffinityV1(p)
+	if p.ClientAffinity != clientAffinityOff && p.ClientAffinity != clientAffinityStrict {
+		return fmt.Errorf("不支持的 Client Affinity 模式 %q", p.ClientAffinity)
+	}
 	if p.ClientAffinity == clientAffinityStrict && p.ClientProvider == "" {
 		return errors.New("Client Affinity strict 模式必须选择客户端 Provider")
 	}
