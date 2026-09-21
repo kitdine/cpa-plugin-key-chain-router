@@ -52,7 +52,7 @@ function renderPolicies() {
     out += '<div class="policy"><div class="row"><div class="grow"><h3 style="margin:0">' +
       esc(p.name) + ' <span class="' + (p.enabled ? 'green' : 'muted') + '">' +
       (p.enabled ? '● 启用' : '● 停用') + '</span></h3><div class="muted">Key ' +
-      esc(p.key_hint) + ' · ' + p.rules.length + ' 条模型规则</div></div>' +
+      esc(p.key_hint) + ' · ' + p.rules.length + ' 条模型规则' + (p.client_affinity === 'strict' ? ' · Client Affinity: ' + esc(p.client_provider) : '') + '</div></div>' +
       '<button onclick="diagnose(\'' + esc(p.key_fingerprint) + '\')">测试策略</button>' +
       '<button onclick="openPolicy(\'' + esc(p.key_fingerprint) + '\')">编辑</button>' +
       '<button onclick="delPolicy(\'' + esc(p.key_fingerprint) + '\')">删除</button></div>';
@@ -80,20 +80,82 @@ function availableKeys(editFp) {
 
 function openPolicy(fp) {
   EDIT = fp ? JSON.parse(JSON.stringify(SNAP.policies.find((x) => x.key_fingerprint === fp))) : {
-    name: '', key_fingerprint: '', key_hint: '', enabled: true, rules: []
+    name: '', key_fingerprint: '', key_hint: '', enabled: true, client_affinity: 'off', client_provider: '', rules: []
   };
   $('policyTitle').textContent = fp ? '编辑 Policy' : '新建 Policy';
   $('pName').value = EDIT.name || '';
   $('pEnabled').value = String(EDIT.enabled !== false);
+  EDIT.client_affinity = EDIT.client_affinity || 'off';
+  EDIT.client_provider = EDIT.client_provider || '';
+  const affinitySupported = EDIT.client_affinity === 'off' || EDIT.client_affinity === 'strict';
+  if (!affinitySupported) {
+    $('pAffinity').innerHTML = '<option value="' + esc(EDIT.client_affinity) + '" selected disabled>' + esc(EDIT.client_affinity) + '（当前版本不支持）</option><option value="off">关闭</option><option value="strict">Strict</option>';
+  } else {
+    $('pAffinity').innerHTML = '<option value="off">关闭</option><option value="strict">Strict</option>';
+    $('pAffinity').value = EDIT.client_affinity;
+  }
+  renderClientProviders();
   const keys = availableKeys(fp);
   $('pKey').innerHTML = keys.map((k) => '<option value="' + esc(k.fingerprint) + '" data-hint="' +
     esc(k.hint) + '">' + esc(k.hint) + '</option>').join('');
   if (EDIT.key_fingerprint) $('pKey').value = EDIT.key_fingerprint;
+  renderAffinityState();
   renderRules();
   $('policyModal').classList.add('open');
 }
 
 function closePolicy() { $('policyModal').classList.remove('open'); }
+
+function clientProviderOptions() {
+  const seen = new Set();
+  return (SNAP.resources || []).map((r) => String(r.provider || '').trim()).filter((p) => {
+    const k = p.toLowerCase();
+    if (!p || seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  }).sort();
+}
+
+function renderClientProviders() {
+  const ps = clientProviderOptions();
+  const current = String(EDIT.client_provider || '').trim();
+  if (current && !ps.some((p) => p.toLowerCase() === current.toLowerCase())) ps.unshift(current);
+  if (!EDIT.client_provider && ps.length) EDIT.client_provider = ps[0];
+  $('pClientProvider').innerHTML = ps.map((p) => '<option value="' + esc(p) + '" ' + (p.toLowerCase() === String(EDIT.client_provider || '').toLowerCase() ? 'selected' : '') + '>' + esc(p) + (current && p.toLowerCase() === current.toLowerCase() && !(SNAP.resources || []).some((r) => String(r.provider || '').toLowerCase() === current.toLowerCase()) ? '（当前资源中不可见）' : '') + '</option>').join('');
+}
+
+function resourceAllowedByAffinity(r) {
+  if (!EDIT || EDIT.client_affinity !== 'strict') return true;
+  if (String(r.kind || '').toLowerCase() === 'oauth') return true;
+  return String(r.provider || '').toLowerCase() === String(EDIT.client_provider || '').toLowerCase();
+}
+
+function renderAffinityState() {
+  const strict = EDIT && EDIT.client_affinity === 'strict';
+  const supported = EDIT && (EDIT.client_affinity === 'off' || strict);
+  $('pClientProviderWrap').style.display = strict ? 'block' : 'none';
+  if (!supported) {
+    $('affinityNote').innerHTML = '<span class="red"><b>当前 Policy 使用此版本不支持的 Client Affinity：' + esc(EDIT.client_affinity) + '。</b>运行时将 fail closed；如需保存修改，请明确选择“关闭”或“Strict”。</span>';
+  } else {
+    $('affinityNote').innerHTML = strict
+      ? 'Strict 已开启：<b>' + esc(EDIT.client_provider || '-') + '</b> 原生 API 资源可选；OAuth 不受 Provider 限制。Mixed / 多套规则仅预留，本期不实现。'
+      : 'Client Affinity 已关闭：候选资源不按客户端 Provider 过滤。';
+  }
+}
+
+function changeAffinity() {
+  EDIT.client_affinity = $('pAffinity').value;
+  if (EDIT.client_affinity !== 'strict') EDIT.client_provider = '';
+  else renderClientProviders();
+  renderAffinityState();
+  renderRules();
+}
+
+function changeClientProvider() {
+  EDIT.client_provider = $('pClientProvider').value;
+  renderAffinityState();
+  renderRules();
+}
 
 function defaultRule() {
   return {
@@ -170,7 +232,7 @@ function candidateMetrics(r, c) {
 }
 
 function resOptions(sel) {
-  return SNAP.resources.map((r) => '<option value="' + esc(r.id) + '" ' + (r.id === sel ? 'selected' : '') + '>' +
+  return SNAP.resources.filter(resourceAllowedByAffinity).map((r) => '<option value="' + esc(r.id) + '" ' + (r.id === sel ? 'selected' : '') + '>' +
     esc(r.kind + ' · ' + r.provider + ' · ' + r.display_name + (r.key_hint ? ' · ' + r.key_hint : '')) + '</option>').join('');
 }
 
@@ -178,8 +240,21 @@ function renderCands(r, ri) {
   const f = strategyFields(r.strategy);
   const cols = f.priority && f.weight ? '1.5fr 1.1fr 90px 90px 1.2fr 105px' :
     f.weight ? '1.5fr 1.1fr 90px 1.2fr 105px' : '1.5fr 1.1fr 1.2fr 105px';
-  return (r.candidates || []).map((c, ci) => '<div class="candidate" style="grid-template-columns:' + cols + '">' +
-    '<div><label>上游资源</label><select onchange="pickRes(' + ri + ',' + ci + ',this.value)">' + resOptions(c.resource_id) + '</select></div>' +
+  return (r.candidates || []).map((c, ci) => {
+    const resource = (SNAP.resources || []).find((x) => x.id === c.resource_id);
+    const missing = !resource;
+    const allowed = !missing && resourceAllowedByAffinity(resource);
+    let options = resOptions(c.resource_id);
+    let warning = '';
+    if (missing) {
+      options = '<option value="' + esc(c.resource_id || '') + '" selected>' + esc(c.name || c.provider || '当前候选') + ' · 当前资源中不可见</option>' + resOptions('');
+      warning = '<div class="warn small">当前资源不可见；保持原配置，选择其他资源后才会替换</div>';
+    } else if (!allowed) {
+      options = '<option value="' + esc(c.resource_id || '') + '" selected>' + esc(c.name || c.provider || '当前候选') + ' · 当前 Affinity 不允许</option>' + resOptions('');
+      warning = '<div class="warn small">保存 Strict Policy 前请更换或删除此候选</div>';
+    }
+    return '<div class="candidate" style="grid-template-columns:' + cols + ';' + (missing || !allowed ? 'opacity:.65' : '') + '">' +
+    '<div><label>上游资源</label><select onchange="pickRes(' + ri + ',' + ci + ',this.value)">' + options + '</select>' + warning + '</div>' +
     '<div><label>显示名称</label><input value="' + esc(c.name || '') + '" oninput="EDIT.rules[' + ri + '].candidates[' + ci + '].name=this.value"></div>' +
     (f.priority ? '<div><label>Priority</label><input type="number" value="' + (c.priority || 100) + '" oninput="EDIT.rules[' + ri + '].candidates[' + ci + '].priority=+this.value||100"></div>' : '') +
     (f.weight ? '<div><label>Weight</label><input type="number" min="1" value="' + (c.weight || 1) + '" oninput="EDIT.rules[' + ri + '].candidates[' + ci + '].weight=+this.value||1"></div>' : '') +
@@ -188,7 +263,8 @@ function renderCands(r, ri) {
     '<option value="true" ' + (c.enabled !== false ? 'selected' : '') + '>启用</option><option value="false" ' +
     (c.enabled === false ? 'selected' : '') + '>停用</option></select><div class="row" style="gap:4px;margin-top:5px">' +
     '<button onclick="moveCand(' + ri + ',' + ci + ',-1)">↑</button><button onclick="moveCand(' + ri + ',' + ci + ',1)">↓</button>' +
-    '<button onclick="EDIT.rules[' + ri + '].candidates.splice(' + ci + ',1);renderRules()">×</button></div></div></div>').join('');
+    '<button onclick="EDIT.rules[' + ri + '].candidates.splice(' + ci + ',1);renderRules()">×</button></div></div></div>';
+  }).join('');
 }
 
 function fromRes(r) {
@@ -199,8 +275,8 @@ function fromRes(r) {
 }
 
 function addCand(ri) {
-  const r = SNAP.resources[0];
-  if (!r) return alert('当前没有可选上游资源');
+  const r = SNAP.resources.find(resourceAllowedByAffinity);
+  if (!r) return alert('当前 Client Affinity 条件下没有可选上游资源');
   EDIT.rules[ri].candidates = EDIT.rules[ri].candidates || [];
   EDIT.rules[ri].candidates.push(fromRes(r));
   renderRules();
@@ -255,6 +331,8 @@ async function savePolicy() {
   EDIT.key_fingerprint = sel.value;
   EDIT.key_hint = hint;
   EDIT.enabled = $('pEnabled').value === 'true';
+  EDIT.client_affinity = $('pAffinity').value;
+  EDIT.client_provider = EDIT.client_affinity === 'strict' ? $('pClientProvider').value : '';
   SNAP = await api({ action: 'save_policy', payload: JSON.stringify(EDIT) });
   closePolicy();
   render();
