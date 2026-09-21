@@ -93,7 +93,7 @@ func normalizeObservability(o ObservabilityConfig) ObservabilityConfig {
 }
 
 func configureV4(statePath string, legacy State) error {
-	st := V4State{Version: v4StateVersion, UpdatedAt: time.Now().UTC().Format(time.RFC3339), Policies: map[string]*Policy{}, Observability: defaultObservability()}
+	st := V4State{Version: v4StateVersion, UpdatedAt: time.Now().UTC().Format(time.RFC3339), Policies: map[string]*Policy{}, Observability: defaultObservability(), ResourceAliases: map[string]string{}}
 	if raw, err := os.ReadFile(statePath); err == nil && len(strings.TrimSpace(string(raw))) > 0 {
 		var probe struct {
 			Version int `json:"version"`
@@ -112,6 +112,9 @@ func configureV4(statePath string, legacy State) error {
 	if st.Policies == nil {
 		st.Policies = map[string]*Policy{}
 	}
+	if st.ResourceAliases == nil {
+		st.ResourceAliases = map[string]string{}
+	}
 	st.Observability = normalizeObservability(st.Observability)
 	normalizePolicies(&st)
 	v4Runtime.Lock()
@@ -129,7 +132,7 @@ func configureV4(statePath string, legacy State) error {
 }
 
 func migrateLegacyV4(legacy State) V4State {
-	st := V4State{Version: v4StateVersion, UpdatedAt: time.Now().UTC().Format(time.RFC3339), Policies: map[string]*Policy{}, Observability: defaultObservability()}
+	st := V4State{Version: v4StateVersion, UpdatedAt: time.Now().UTC().Format(time.RFC3339), Policies: map[string]*Policy{}, Observability: defaultObservability(), ResourceAliases: map[string]string{}}
 	routes := make([]*Route, 0, len(legacy.Routes))
 	for _, r := range legacy.Routes {
 		if r != nil {
@@ -272,6 +275,9 @@ func validatePolicy(p *Policy) error {
 			return fmt.Errorf("规则 %d 为空", i+1)
 		}
 		normalizeRule(r)
+		if r.Strategy == strategySticky && r.StickySource == "header" && strings.TrimSpace(r.StickyHeader) == "" {
+			return fmt.Errorf("规则 %s 使用指定 Header Sticky 时必须填写 Header 名称", r.Name)
+		}
 		if r.Strategy != strategyCPADefault && len(enabledV4Candidates(r)) == 0 {
 			return fmt.Errorf("规则 %s 没有启用候选", r.Name)
 		}
