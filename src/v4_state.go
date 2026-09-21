@@ -272,7 +272,7 @@ func validatePolicy(p *Policy) error {
 		if r.Strategy != strategyCPADefault && len(enabledV4Candidates(r)) == 0 {
 			return fmt.Errorf("规则 %s 没有启用候选", r.Name)
 		}
-		if p.ClientAffinity == clientAffinityStrict {
+		if p.ClientAffinity == clientAffinityStrict && r.Strategy != strategyCPADefault {
 			for _, c := range enabledV4Candidates(r) {
 				if !candidateAllowedByClientAffinityV1(p, c) {
 					return fmt.Errorf("规则 %s 的候选 %s 不符合 Client Affinity strict：仅允许 %s 原生 API 资源或 OAuth", r.Name, c.Name, p.ClientProvider)
