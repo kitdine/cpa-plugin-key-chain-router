@@ -42,7 +42,7 @@ function showView(name) {
     const nav = $('navPolicy');
     if (nav) nav.classList.add('active');
   }
-  if (name === 'usage') loadEvents();
+  if (name === 'usage') loadEvents(true);
   if (name === 'resources') renderResources();
   window.scrollTo({ top: 0, behavior: 'instant' });
 }
@@ -722,7 +722,7 @@ async function saveObs() {
   renderAll();
   alert('已保存');
 }
-async function clearMemory(){ SNAP=await api({action:'clear_memory'}); await loadEvents(); }
+async function clearMemory(){ SNAP=await api({action:'clear_memory'}); renderAll(); await Promise.all([loadDashboard(), CURRENT_VIEW==='usage'?loadEvents(true):Promise.resolve()]); }
 
 function eventParams() {
   const q={
