@@ -3,6 +3,11 @@ let EDIT = null;
 let DIAG = null;
 let EVENT_DATA = null;
 let EVENT_EXPANDED = new Set();
+let ROUTE_STATS = null;
+let DASH_STATS = null;
+let DASH_EVENTS = null;
+let ROUTE_PAGE = 1;
+const ROUTE_PAGE_SIZE = 10;
 let RULE_SEARCH = {};
 let DRAG_CAND = null;
 let CURRENT_VIEW = 'dashboard';
@@ -37,7 +42,7 @@ function showView(name) {
     const nav = $('navPolicy');
     if (nav) nav.classList.add('active');
   }
-  if (name === 'usage') loadEvents();
+  if (name === 'usage') loadEvents(true);
   if (name === 'resources') renderResources();
   window.scrollTo({ top: 0, behavior: 'instant' });
 }
@@ -45,46 +50,223 @@ function showView(name) {
 async function load() {
   SNAP = await api({ action: 'snapshot' });
   renderAll();
-  await loadEvents();
+  await loadDashboard();
 }
 
 function renderAll() {
   $('versionBadge').textContent = 'v' + (SNAP.version || 'dev');
-  renderDashboard();
   renderPolicies();
   renderResources();
   renderObs();
+  if (DASH_STATS) renderDashboard();
+}
+
+function dashboardSince() {
+  return $('dashboardSince')?.value || '1h';
+}
+
+function routeStatsParams(since) {
+  const q = { action: 'route_stats', since: since || '1h' };
+  const policy = $('eventPolicy')?.value;
+  const provider = $('eventProvider')?.value;
+  const model = $('eventModel')?.value;
+  if (policy && policy !== 'all') q.policy = policy;
+  if (provider && provider !== 'all') q.provider = provider;
+  if (model && model !== 'all') q.model = model;
+  return q;
+}
+
+async function loadDashboard() {
+  try {
+    const since = dashboardSince();
+    const [snapshot, stats, events] = await Promise.all([
+      api({ action: 'snapshot' }),
+      api({ action: 'route_stats', since }),
+      api({ action: 'events', since, route_only: 'true', limit: '100', offset: '0' })
+    ]);
+    SNAP = snapshot;
+    DASH_STATS = stats;
+    DASH_EVENTS = events;
+    renderAll();
+    $('dashboardLastUpdated').textContent = '最后更新：' + new Date().toLocaleTimeString();
+  } catch (e) {
+    const target = $('dashboardIncidents') || $('dashboardPage');
+    if (target) target.innerHTML = '<div class="note">仪表盘刷新失败：' + esc(e.message || e) + '</div>';
+  }
+}
+
+function pct(n,d) {
+  if (!d) return '0%';
+  return (Number(n || 0) * 100 / Number(d)).toFixed(1) + '%';
+}
+
+function fmtDurationMs(ms) {
+  ms = Number(ms || 0);
+  if (!Number.isFinite(ms) || ms <= 0) return '—';
+  if (ms < 1000) return Math.round(ms) + 'ms';
+  if (ms < 60000) return (ms / 1000).toFixed(ms < 10000 ? 1 : 0) + 's';
+  return Math.ceil(ms / 60000) + 'm';
+}
+
+function healthRank(state) {
+  switch (String(state || '').toLowerCase()) {
+    case 'unavailable': return 4;
+    case 'open': return 3;
+    case 'half_open': return 2;
+    default: return 1;
+  }
+}
+
+function healthLabel(state) {
+  switch (String(state || '').toLowerCase()) {
+    case 'unavailable': return {label:'不可用', cls:'bad'};
+    case 'open': return {label:'OPEN', cls:'bad'};
+    case 'half_open': return {label:'HALF_OPEN', cls:'warn'};
+    default: return {label:'正常', cls:'ok'};
+  }
+}
+
+function resourceHealthSummaries() {
+  const health = SNAP.candidate_health || [];
+  return (SNAP.resources || []).map((r) => {
+    const matches = health.filter((h) =>
+      String(h.provider || '').toLowerCase() === String(r.provider || '').toLowerCase() &&
+      String(h.auth_index || '') === String(r.auth_index || '')
+    );
+    let state = (r.unavailable || String(r.status || '').toLowerCase() === 'disabled') ? 'unavailable' : 'closed';
+    let failures = 0;
+    let retry = 0;
+    let nextProbe = '';
+    for (const h of matches) {
+      if (healthRank(h.state) > healthRank(state)) state = h.state;
+      failures = Math.max(failures, Number(h.consecutive_failures || 0));
+      const x = Number(h.retry_in_ms || 0);
+      if (x > 0 && (!retry || x < retry)) retry = x;
+      if (!nextProbe && h.next_probe_at) nextProbe = h.next_probe_at;
+    }
+    return {resource:r, state, failures, retry, nextProbe};
+  });
+}
+
+function policyDashboardRule(p) {
+  const rules = p.rules || [];
+  return rules.find((r) => r.strategy !== 'cpa-default' && (r.models || []).includes('*')) ||
+    rules.find((r) => r.strategy !== 'cpa-default') || rules[0] || null;
+}
+
+function candidateHealthState(p, rule, cand) {
+  const h = (SNAP.candidate_health || []).find((x) =>
+    x.key_fingerprint === p.key_fingerprint &&
+    x.rule_id === rule.id &&
+    x.candidate_id === cand.id
+  );
+  return h ? String(h.state || 'closed').toLowerCase() : 'closed';
+}
+
+function routeChainHTML(p) {
+  const rule = policyDashboardRule(p);
+  if (!rule) return '<span class="muted">—</span>';
+  if (rule.strategy === 'cpa-default') return '<span class="route-node">CPA Default</span>';
+  const xs = (rule.candidates || []).filter((c) => c.enabled !== false);
+  if (!xs.length) return '<span class="muted">无启用候选</span>';
+  return '<div class="route-chain">' + xs.map((c,i) => {
+    const state = candidateHealthState(p, rule, c);
+    const bad = state === 'open' || state === 'half_open';
+    return (i ? '<span class="route-arrow">→</span>' : '') +
+      '<span class="route-node ' + (bad ? 'bad' : '') + '">' + esc(c.name || c.provider || '-') + (bad ? ' ×' : '') + '</span>';
+  }).join('') + '</div>';
+}
+
+function renderTrendChart(points) {
+  const xs = points || [];
+  if (!xs.length || !xs.some((x) => Number(x.direct||0)+Number(x.fallback||0)+Number(x.failed||0)>0)) {
+    return '<div class="empty">当前时间范围暂无路由数据</div>';
+  }
+  const max = Math.max(1, ...xs.map((x) => Number(x.direct||0)+Number(x.fallback||0)+Number(x.failed||0)));
+  const cols = xs.map((x) => {
+    const direct = Number(x.direct || 0), fallback = Number(x.fallback || 0), failed = Number(x.failed || 0);
+    const total = direct + fallback + failed;
+    const height = Math.max(total ? 5 : 0, total * 100 / max);
+    const dp = total ? direct * 100 / total : 0;
+    const fp = total ? fallback * 100 / total : 0;
+    const ep = total ? failed * 100 / total : 0;
+    return '<div class="trend-col" title="直接成功 '+direct+' · Fallback '+fallback+' · 失败 '+failed+'"><div class="trend-stack" style="height:'+height+'%"><span class="trend-direct" style="height:'+dp+'%"></span><span class="trend-fallback" style="height:'+fp+'%"></span><span class="trend-failed" style="height:'+ep+'%"></span></div></div>';
+  }).join('');
+  const first = new Date(xs[0].at), last = new Date(xs[xs.length-1].at);
+  const time = (d) => Number.isNaN(d.getTime()) ? '' : d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+  return '<div class="legend"><span><i style="background:#2fc184"></i>直接成功</span><span><i style="background:#f7b955"></i>Fallback</span><span><i style="background:#f37b75"></i>失败</span></div><div class="dashboard-trend">'+cols+'</div><div class="trend-axis"><span>'+esc(time(first))+'</span><span>'+esc(time(last))+'</span></div>';
 }
 
 function renderDashboard() {
+  if (!SNAP || !DASH_STATS) return;
   const policies = SNAP.policies || [];
   const resources = SNAP.resources || [];
-  const oauth = resources.filter((r) => String(r.kind || '').toLowerCase() === 'oauth').length;
-  const strict = policies.filter((p) => p.client_affinity === 'strict').length;
+  const healthRows = resourceHealthSummaries();
+  const abnormal = healthRows.filter((x) => healthRank(x.state) > 1);
+  const stats = DASH_STATS.stats || {};
   const cards = [
-    ['下游 API Key', (SNAP.downstream_keys || []).length, 'CPA 原生认证入口'],
-    ['Policy', policies.length, strict + ' 个启用 Client Affinity'],
-    ['上游资源', resources.length, oauth + ' 个 OAuth'],
-    ['配置状态', SNAP.config_error ? '异常' : '正常', SNAP.config_path || '未定位 config.yaml']
+    ['Policy', policies.length, '当前配置'],
+    ['上游资源', resources.length, '当前可见'],
+    ['异常资源', abnormal.length, abnormal.length ? '需要关注' : '全部正常'],
+    ['近 ' + (($('dashboardSince')?.selectedOptions?.[0]?.textContent || '1 小时').replace('最近 ','')) + ' Fallback', stats.fallback || 0, stats.total ? pct(stats.fallback, stats.total) : '暂无请求']
   ];
-  $('dashboardStats').innerHTML = cards.map(([n,v,h]) =>
-    '<div class="stat"><div class="muted small">' + esc(n) + '</div><b>' + esc(v) + '</b><div class="hint">' + esc(h) + '</div></div>'
+  $('dashboardStats').innerHTML = cards.map(([n,v,h],i) =>
+    '<div class="stat"><div class="muted small">' + esc(n) + '</div><b>' + esc(v) + '</b><div class="hint ' + (i===2&&Number(v)>0?'red':'') + '">' + esc(h) + '</div></div>'
   ).join('');
 
-  $('dashboardPolicies').innerHTML = policies.length ? policies.slice(0,6).map((p) =>
-    '<div class="policy-row"><div class="row"><div class="grow"><h3>' + esc(p.name) + '</h3><div class="policy-meta"><span>Key ' + esc(p.key_hint) + '</span><span>' + (p.rules || []).length + ' 条规则</span><span>客户端 ' + esc(clientTypeLabel(p.client_type || p.client_provider || '-')) + '</span><span>' + (p.client_affinity === 'strict' ? 'Affinity Strict' : 'Affinity Off') + '</span></div></div><button class="btn small" onclick="openPolicy(\'' + esc(p.key_fingerprint) + '\')">编辑</button></div></div>'
-  ).join('') : '<div class="empty">尚未创建 Policy</div>';
+  $('dashboardTrend').innerHTML = renderTrendChart(DASH_STATS.trend || []);
+  $('dashboardTrendRange').textContent = $('dashboardSince')?.selectedOptions?.[0]?.textContent || '';
 
-  const grouped = {};
-  resources.forEach((r) => {
-    const k = String(r.kind || 'unknown');
-    grouped[k] = (grouped[k] || 0) + 1;
-  });
-  $('dashboardResources').innerHTML = '<div class="data-table"><div class="row" style="justify-content:space-between;padding:8px 0"><span>API Provider</span><b>' + (grouped.API || 0) + '</b></div><div class="row" style="justify-content:space-between;padding:8px 0"><span>OAuth</span><b>' + (grouped.OAuth || 0) + '</b></div><div class="row" style="justify-content:space-between;padding:8px 0"><span>当前可见资源</span><b>' + resources.length + '</b></div></div><div style="margin-top:12px"><button class="btn small" onclick="showView(\'resources\')">查看全部资源</button></div>';
+  const unavailable = healthRows.filter((x)=>x.state==='unavailable').length;
+  const open = healthRows.filter((x)=>x.state==='open'||x.state==='half_open').length;
+  const pf = DASH_STATS.policy_fallbacks || {};
+  const fallbackPolicies = Object.keys(pf).filter((k)=>Number(pf[k])>0).length;
+  const retryValues = healthRows.map((x)=>Number(x.retry||0)).filter((x)=>x>0);
+  const nextProbe = retryValues.length ? Math.min(...retryValues) : 0;
+  const attention = unavailable + open + fallbackPolicies;
+  $('dashboardAttention').textContent = attention ? attention + ' 项需要关注' : '无异常';
+  $('dashboardAttention').className = 'tag ' + (attention ? 'filtered' : 'ok');
+  const anomalyRows = [
+    ['red','!', '上游资源不可用', unavailable],
+    ['orange','!', '资源处于 OPEN / HALF_OPEN', open],
+    ['blue','↔', 'Policy 发生 Fallback', fallbackPolicies],
+    ['blue','◷', '下一次探测', nextProbe ? fmtDurationMs(nextProbe) + ' 后' : '—']
+  ];
+  $('dashboardAnomalies').innerHTML = '<div class="anomaly-list">' + anomalyRows.map(([cls,icon,name,val]) =>
+    '<div class="anomaly-row"><span class="anomaly-icon '+cls+'">'+icon+'</span><span class="grow">'+esc(name)+'</span><b>'+esc(val)+'</b></div>'
+  ).join('') + '</div>';
 
-  $('envNotice').innerHTML = SNAP.config_error
-    ? '<div class="note" style="margin-top:14px">CPA 配置读取异常：' + esc(SNAP.config_error) + '</div>'
-    : '<div class="info" style="margin-top:14px">当前 CPA 配置：<span class="mono">' + esc(SNAP.config_path || '-') + '</span></div>';
+  const pFallbacks = DASH_STATS.policy_fallbacks || {};
+  let healthyPolicies = 0;
+  $('dashboardPolicies').innerHTML = policies.length ? '<div class="table-wrap"><table class="data-table"><thead><tr><th>Policy 名称</th><th>客户端类型</th><th>Client Affinity</th><th>当前路由链</th><th>Fallback</th><th>状态</th><th>操作</th></tr></thead><tbody>' +
+    policies.map((p) => {
+      const rule=policyDashboardRule(p);
+      const bad=(rule?.candidates||[]).some((cand)=>['open','half_open'].includes(candidateHealthState(p,rule,cand)));
+      const fb=Number(pFallbacks[p.name]||0);
+      const state=!p.enabled?{label:'停用',cls:'muted'}:bad?{label:'注意',cls:'warn'}:{label:'正常',cls:'green'};
+      if(p.enabled&&!bad) healthyPolicies++;
+      return '<tr><td><b>'+esc(p.name)+'</b></td><td>'+esc(clientTypeLabel(p.client_type||p.client_provider||'-'))+'</td><td><span class="tag '+(p.client_affinity==='strict'?'ok':'')+'">'+(p.client_affinity==='strict'?'ON':'OFF')+'</span></td><td>'+routeChainHTML(p)+'</td><td>'+fb+'</td><td><span class="'+state.cls+'">● '+esc(state.label)+'</span></td><td><button class="btn small" onclick="openPolicy(\''+esc(p.key_fingerprint)+'\')">编辑</button></td></tr>';
+    }).join('') + '</tbody></table></div>' : '<div class="empty">尚未创建 Policy</div>';
+  $('dashboardPolicyHealth').textContent = healthyPolicies + ' / ' + policies.length + ' 正常';
+
+  const sortedHealth = healthRows.slice().sort((a,b)=>healthRank(b.state)-healthRank(a.state)||resourceLabel(a.resource).localeCompare(resourceLabel(b.resource)));
+  $('dashboardResources').innerHTML = sortedHealth.length ? '<div class="table-wrap"><table class="data-table"><thead><tr><th>资源别名</th><th>类型</th><th>Provider</th><th>当前状态</th><th>连续失败</th><th>Backoff / Next Probe</th><th>操作</th></tr></thead><tbody>' +
+    sortedHealth.slice(0,8).map((x)=>{
+      const st=healthLabel(x.state);
+      return '<tr><td><b>'+esc(resourceLabel(x.resource))+'</b></td><td><span class="tag '+(String(x.resource.kind).toLowerCase()==='oauth'?'oauth':'api')+'">'+esc(x.resource.kind||'-')+'</span></td><td>'+esc(x.resource.provider||'-')+'</td><td><span class="status-pill '+st.cls+'"><span class="health-dot '+st.cls+'"></span>'+esc(st.label)+'</span></td><td>'+x.failures+'</td><td>'+esc(x.retry?fmtDurationMs(x.retry)+' 后':'—')+'</td><td><button class="btn small" onclick="openResourceDrawer(\''+esc(x.resource.id)+'\')">查看</button></td></tr>';
+    }).join('') + '</tbody></table></div>' : '<div class="empty">没有上游资源</div>';
+
+  const incidents=(DASH_EVENTS?.events||[]).filter((e)=>!e.success||(e.attempts||[]).length>1||e.decision==='KCR_FALLBACK_TO_CPA').slice(0,5);
+  $('dashboardIncidents').innerHTML = incidents.length ? '<div class="table-wrap"><table class="data-table incident-table"><thead><tr><th>时间</th><th>级别</th><th>Policy</th><th>事件</th><th>详情</th></tr></thead><tbody>' +
+    incidents.map((e)=>{
+      const path=eventRoutePath(e);
+      const level=!e.success?['错误','red']:['警告','warn'];
+      const event=!e.success?'路由失败':'触发 Fallback';
+      const detail=path+(e.status?' · HTTP '+e.status:'');
+      return '<tr><td class="mono">'+esc(fmtEventTime(e.at))+'</td><td><span class="'+level[1]+'">● '+level[0]+'</span></td><td>'+esc(e.policy_name||'-')+'</td><td>'+esc(event)+'</td><td>'+esc(detail)+'</td></tr>';
+    }).join('')+'</tbody></table></div>' : '<div class="empty">当前时间范围没有异常路由事件</div>';
+
+  $('envNotice').innerHTML = SNAP.config_error ? '<div class="note">CPA 配置读取异常：'+esc(SNAP.config_error)+'</div>' : '';
 }
 
 function renderPolicies() {
@@ -540,24 +722,37 @@ async function saveObs() {
   renderAll();
   alert('已保存');
 }
-async function clearMemory(){ SNAP=await api({action:'clear_memory'}); await loadEvents(); }
+async function clearMemory(){ SNAP=await api({action:'clear_memory'}); renderAll(); await Promise.all([loadDashboard(), CURRENT_VIEW==='usage'?loadEvents(true):Promise.resolve()]); }
 
 function eventParams() {
-  const q={action:'events',limit:$('eventLimit')?.value||'200'};
-  for (const [k,id] of [['q','eventSearch'],['decision','eventDecision'],['success','eventSuccess'],['policy','eventPolicy'],['strategy','eventStrategy'],['provider','eventProvider'],['model','eventModel'],['status','eventStatus'],['since','eventSince']]) {
+  const q={
+    action:'events',
+    route_only:'true',
+    limit:String(ROUTE_PAGE_SIZE),
+    offset:String((ROUTE_PAGE-1)*ROUTE_PAGE_SIZE),
+    since:$('eventSince')?.value||'1h'
+  };
+  for (const [k,id] of [['policy','eventPolicy'],['provider','eventProvider'],['model','eventModel']]) {
     const v=$(id)?.value;
     if (v && v!=='all') q[k]=v;
   }
   return q;
 }
 
-async function loadEvents() {
+async function loadEvents(resetPage=false) {
   if (!$('events')) return;
+  if (resetPage) ROUTE_PAGE=1;
   try {
-    EVENT_DATA=await api(eventParams());
+    const params=eventParams();
+    const statsParams=routeStatsParams(params.since);
+    const [events,stats]=await Promise.all([api(params),api(statsParams)]);
+    EVENT_DATA=events;
+    ROUTE_STATS=stats;
     renderEventFacets(EVENT_DATA.facets||{});
-    renderEventStats(EVENT_DATA.stats||{});
+    renderEventStats(ROUTE_STATS.stats||{});
+    renderRouteAnalysis();
     renderEvents();
+    renderEventPager();
   } catch(e) {
     $('events').innerHTML='<div class="note">查询失败：'+esc(e.message||e)+'</div>';
   }
@@ -569,22 +764,116 @@ function setFacet(id,values,allLabel) {
   el.innerHTML='<option value="all">'+esc(allLabel)+'</option>'+(values||[]).map((v)=>'<option value="'+esc(v)+'">'+esc(v)+'</option>').join('');
   if ([...el.options].some((o)=>o.value===current)) el.value=current;
 }
-function renderEventFacets(f){setFacet('eventPolicy',f.policies,'全部 Policy');setFacet('eventStrategy',f.strategies,'全部 Strategy');setFacet('eventProvider',f.providers,'全部 Provider');setFacet('eventModel',f.models,'全部 Model');}
-function fmtNumber(v,d=0){const n=Number(v||0);return Number.isFinite(n)?n.toFixed(d):'0';}
-function renderEventStats(s) {
-  const cards=[['匹配请求',fmtNumber(s.total),'当前筛选'],['成功率',fmtNumber(s.success_rate,1)+'%',(s.success||0)+' 成功 / '+(s.failed||0)+' 失败'],['平均耗时',fmtNumber(s.avg_duration_ms)+' ms','端到端路由耗时'],['P95 耗时',fmtNumber(s.p95_duration_ms)+' ms','当前筛选'],['Fallback',fmtNumber(s.fallback),'转入 CPA 默认路由'],['平均尝试',fmtNumber(s.avg_attempts,2),'每个请求的候选次数']];
-  $('eventStats').innerHTML=cards.map(([n,v,h])=>'<div class="stat"><div class="muted small">'+esc(n)+'</div><b>'+esc(v)+'</b><div class="hint">'+esc(h)+'</div></div>').join('');
+function renderEventFacets(f){
+  setFacet('eventPolicy',f.policies,'全部');
+  setFacet('eventProvider',f.providers,'全部');
+  setFacet('eventModel',f.models,'全部');
 }
-function resetEventFilters(){for(const id of ['eventSearch']) if($(id))$(id).value='';for(const id of ['eventDecision','eventSuccess','eventPolicy','eventStrategy','eventProvider','eventModel','eventStatus','eventSince'])if($(id))$(id).value='all';if($('eventLimit'))$('eventLimit').value='200';loadEvents();}
+function fmtNumber(v,d=0){const n=Number(v||0);return Number.isFinite(n)?n.toFixed(d):'0';}
+
+function renderEventStats(s) {
+  const total=Number(s.total||0), direct=Number(s.direct||0), fallback=Number(s.fallback||0), failed=Number(s.failed||0);
+  const cards=[
+    ['总请求',total,'当前筛选'],
+    ['直接成功',direct,pct(direct,total)],
+    ['Fallback',fallback,pct(fallback,total)],
+    ['失败',failed,pct(failed,total)]
+  ];
+  $('eventStats').innerHTML=cards.map(([n,v,h],i)=>'<div class="stat"><div class="muted small">'+esc(n)+'</div><b>'+esc(v)+'</b><div class="hint '+(i===2?'warn':i===3?'red':'green')+'">'+esc(h)+'</div></div>').join('');
+}
+
+function renderRouteAnalysis() {
+  if (!ROUTE_STATS) return;
+  renderCandidateHits(ROUTE_STATS.candidate_hits||[]);
+  renderFallbackPaths(ROUTE_STATS.fallback_paths||[]);
+  renderFailureReasons(ROUTE_STATS.failure_reasons||[]);
+  renderAttemptsDistribution(ROUTE_STATS.attempts||[], Number(ROUTE_STATS.stats?.total||0));
+}
+
+function renderCandidateHits(xs) {
+  if (!xs.length) { $('candidateHitChart').innerHTML='<div class="empty">暂无候选命中数据</div>'; return; }
+  $('candidateHitChart').innerHTML='<div class="bar-list">'+xs.slice(0,8).map((x)=>{
+    const total=Number(x.direct||0)+Number(x.fallback||0)+Number(x.failed||0);
+    const d=total?Number(x.direct||0)*100/total:0, f=total?Number(x.fallback||0)*100/total:0, e=total?Number(x.failed||0)*100/total:0;
+    return '<div class="bar-row"><div><b>'+esc(x.name)+'</b></div><div class="bar-track" title="首选 '+x.direct+' · Fallback '+x.fallback+' · 失败 '+x.failed+'"><span class="bar-direct" style="width:'+d+'%"></span><span class="bar-fallback" style="width:'+f+'%"></span><span class="bar-failed" style="width:'+e+'%"></span></div><div class="bar-values">'+fmtNumber(d,0)+'% / '+fmtNumber(f,0)+'%</div></div>';
+  }).join('')+'</div><div class="legend" style="margin-top:12px"><span><i style="background:#32bd82"></i>首选命中</span><span><i style="background:#f5bb58"></i>Fallback 命中</span><span><i style="background:#ee7773"></i>最终失败</span></div>';
+}
+
+function renderFallbackPaths(xs) {
+  if (!xs.length) { $('fallbackPathChart').innerHTML='<div class="empty">当前筛选没有 Fallback</div>'; return; }
+  const max=Math.max(1,...xs.map((x)=>Number(x.count||0)));
+  $('fallbackPathChart').innerHTML='<div class="bar-list">'+xs.slice(0,8).map((x)=>
+    '<div class="bar-row"><div class="ellipsis" title="'+esc(x.name)+'"><b>'+esc(x.name)+'</b></div><div class="bar-track"><span class="bar-single" style="width:'+(Number(x.count||0)*100/max)+'%"></span></div><div class="bar-values">'+esc(x.count)+' · '+fmtNumber(x.share,1)+'%</div></div>'
+  ).join('')+'</div>';
+}
+
+function renderFailureReasons(xs) {
+  if (!xs.length) { $('failureReasonChart').innerHTML='<div class="empty">当前筛选没有失败请求</div>'; return; }
+  const max=Math.max(1,...xs.map((x)=>Number(x.count||0)));
+  $('failureReasonChart').innerHTML='<div class="bar-list">'+xs.slice(0,7).map((x)=>
+    '<div class="failure-row"><div>'+esc(x.name)+'</div><div class="bar-track"><span class="failure-bar" style="width:'+(Number(x.count||0)*100/max)+'%"></span></div><b>'+esc(x.count)+'</b><span class="muted">'+fmtNumber(x.share,1)+'%</span></div>'
+  ).join('')+'</div>';
+}
+
+function renderAttemptsDistribution(xs,total) {
+  if (!xs.length || !total) { $('attemptsChart').innerHTML='<div class="empty">暂无 Attempts 数据</div>'; return; }
+  const colors=['#2fc184','#f5bb58','#4f8bf7','#ef6a67','#94a3b8'];
+  let acc=0;
+  const stops=[];
+  xs.forEach((x,i)=>{
+    const p=Number(x.share||0), start=acc; acc+=p;
+    stops.push(colors[i%colors.length]+' '+start+'% '+acc+'%');
+  });
+  if(acc<100) stops.push('#edf2f7 '+acc+'% 100%');
+  const legend=xs.map((x,i)=>'<div class="donut-legend-row"><span class="donut-swatch" style="background:'+colors[i%colors.length]+'"></span><span class="grow">'+esc(x.name==='4+'?'4+ 次':x.name+' 次')+'</span><b>'+fmtNumber(x.share,0)+'%</b></div>').join('');
+  $('attemptsChart').innerHTML='<div class="donut-wrap"><div class="donut" style="background:conic-gradient('+stops.join(',')+')"><div class="donut-center"><b>'+esc(total)+'</b><span class="muted small">总请求</span></div></div><div class="donut-legend">'+legend+'</div></div>';
+}
+
 function reasonLabel(r){return({no_matching_rule:'Policy 已配置，但 model 未命中任何 Rule，交给 CPA 默认路由',rule_cpa_default:'命中 Rule 明确配置为 CPA 默认路由',no_enabled_candidates:'命中 Rule，但没有启用候选',candidates_exhausted:'候选全部尝试后仍失败',policy_fallback_to_cpa:'Failover 规则转入 CPA 默认路由',policy_disabled:'该 API Key 的 KCR Policy 已停用',policy_lookup_miss:'检测到 Policy 查找异常',unsupported_client_affinity:'Client Affinity 模式不受支持，已 fail closed'})[r]||r||'';}
 function statusLabel(a){if(a.status)return'HTTP '+a.status;if(a.error)return'ERROR';return'-';}
-function renderAttempt(e,a,i){const reasons=e.selection_reasons||[];const reason=reasons[i]||(i===0?'按当前策略排序后选择此候选':'按 Failover 策略选择后续候选');const detail=[a.provider,a.auth_index?'AuthIndex '+a.auth_index:'',a.model?'model '+a.model:'',Number.isFinite(Number(a.duration_ms))?a.duration_ms+' ms':''].filter(Boolean).join(' · ');return '<div class="attempt"><div class="row"><b>#'+(i+1)+' '+esc(a.candidate||'-')+'</b><span class="tag">'+esc(statusLabel(a))+'</span><span class="muted small">'+esc(detail)+'</span></div><div class="reason"><b>选择原因：</b>'+esc(reason)+'</div>'+(a.error?'<div class="red small" style="margin-top:4px">'+esc(a.error)+'</div>':'')+'</div>';}
+function candidateAliasForAttempt(a){
+  const r=(SNAP.resources||[]).find((x)=>String(x.provider||'').toLowerCase()===String(a.provider||'').toLowerCase()&&String(x.auth_index||'')===String(a.auth_index||''));
+  return r?resourceLabel(r):(a.candidate||'-');
+}
+function renderAttempt(e,a,i){const reasons=e.selection_reasons||[];const reason=reasons[i]||(i===0?'按当前策略排序后选择此候选':'按 Failover 策略选择后续候选');const detail=[a.provider,a.auth_index?'AuthIndex '+a.auth_index:'',a.model?'model '+a.model:'',Number.isFinite(Number(a.duration_ms))?a.duration_ms+' ms':''].filter(Boolean).join(' · ');return '<div class="attempt"><div class="row"><b>#'+(i+1)+' '+esc(candidateAliasForAttempt(a))+'</b><span class="tag">'+esc(statusLabel(a))+'</span><span class="muted small">'+esc(detail)+'</span></div><div class="reason"><b>选择原因：</b>'+esc(reason)+'</div>'+(a.error?'<div class="red small" style="margin-top:4px">'+esc(a.error)+'</div>':'')+'</div>';}
 function fmtEventTime(at){if(!at)return'-';const d=new Date(String(at));if(Number.isNaN(d.getTime()))return String(at);const p=(n)=>String(n).padStart(2,'0');return p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds());}
-function eventState(e){if(e.success===false)return{cls:'event-state-error',label:'失败'};if(e.decision==='KCR_FALLBACK_TO_CPA')return{cls:'event-state-fallback',label:'Fallback'};if(e.decision==='KCR_BYPASS_CPA_DEFAULT')return{cls:'event-state-bypass',label:'Bypass'};return{cls:'event-state-ok',label:'成功'};}
+function eventOutcome(e){if(e.success===false)return'failed';if((e.attempts||[]).length>1||e.decision==='KCR_FALLBACK_TO_CPA')return'fallback';return'direct';}
+function eventState(e){const o=eventOutcome(e);if(o==='failed')return{cls:'event-state-error',label:'失败'};if(o==='fallback')return{cls:'event-state-fallback',label:'Fallback'};return{cls:'event-state-ok',label:'成功'};}
 function eventStatusText(e){if(e.status)return String(e.status);if(e.success===false)return'ERR';return'-';}
+function eventRoutePath(e){
+  const xs=(e.attempts||[]).map(candidateAliasForAttempt).filter(Boolean);
+  if(!xs.length)return e.final||'-';
+  return xs.filter((x,i)=>i===0||x!==xs[i-1]).join(' → ');
+}
 function toggleEvent(traceID){if(!traceID)return;if(EVENT_EXPANDED.has(traceID))EVENT_EXPANDED.delete(traceID);else EVENT_EXPANDED.add(traceID);renderEvents();}
-function renderEventDetail(e){const eventReason=reasonLabel(e.reason);const final=e.final||(e.decision==='KCR_FALLBACK_TO_CPA'?'CPA Default':'-');const primary=['时间 '+fmtEventTime(e.at),'Model '+(e.model||'-'),'Policy '+(e.policy_name||'-'),'Rule '+(e.rule_name||'-'),'Strategy '+(e.strategy||'-'),'最终候选 '+final,'Provider '+(e.provider||'-'),'状态 '+eventStatusText(e),'耗时 '+(e.duration_ms||0)+' ms','Attempts '+((e.attempts||[]).length)].join(' · ');return '<div class="event-detail"><div class="small">'+esc(primary)+'</div>'+(eventReason?'<div style="margin-top:7px"><b>路由结果：</b>'+esc(eventReason)+'</div>':'')+'<div class="muted small" style="margin-top:6px">'+esc(e.trace_id?'Trace '+e.trace_id:'')+'</div><div style="font-weight:800;margin-top:12px">候选尝试</div><div class="attempts">'+((e.attempts||[]).length?(e.attempts||[]).map((a,i)=>renderAttempt(e,a,i)).join(''):'<div class="muted small">没有候选尝试记录</div>')+'</div></div>';}
-function renderEvents(){if(!EVENT_DATA)return;const xs=EVENT_DATA.events||[];const source=EVENT_DATA.source==='sqlite'?'SQLite':'Memory';$('eventResultMeta').textContent='数据源 '+source+' · 匹配 '+(EVENT_DATA.matched||0)+' 条 · 返回 '+(EVENT_DATA.returned||0)+' 条';if(!xs.length){$('events').innerHTML='<div class="empty" style="margin-top:14px">当前条件下暂无路由记录</div>';return;}const rows=xs.map((e)=>{const key=e.trace_id||e.at,expanded=EVENT_EXPANDED.has(key),state=eventState(e),attempts=(e.attempts||[]).length,final=e.final||(e.decision==='KCR_FALLBACK_TO_CPA'?'CPA Default':'-');const row='<tr class="event-row '+(expanded?'expanded':'')+'" onclick="toggleEvent(\''+esc(key)+'\')"><td class="event-toggle"><span class="chevron">'+(expanded?'▾':'›')+'</span></td><td class="event-time mono">'+esc(fmtEventTime(e.at))+'</td><td><div class="event-primary ellipsis">'+esc(e.model||'-')+'</div></td><td><div class="event-primary">'+esc(e.policy_name||'-')+'</div><div class="muted small ellipsis">'+esc(e.rule_name||'-')+'</div></td><td><span class="strategy-chip">'+esc(e.strategy||'-')+'</span></td><td><div class="event-primary ellipsis">'+esc(final)+'</div></td><td>'+esc(e.provider||'-')+'</td><td><span class="event-state '+state.cls+'"><i></i>'+esc(state.label)+'</span> <span class="http-code">'+esc(eventStatusText(e))+'</span></td><td>'+(e.duration_ms||0)+' ms</td><td><span class="attempt-count '+(attempts>1?'multi':'')+'">'+attempts+'</span></td></tr>';return row+(expanded?'<tr class="event-detail-row"><td colspan="10">'+renderEventDetail(e)+'</td></tr>':'');}).join('');$('events').innerHTML='<div class="event-table-wrap"><table class="event-table"><thead><tr><th></th><th>时间（本地）</th><th>Model</th><th>Policy / Rule</th><th>Strategy</th><th>最终候选</th><th>Provider</th><th>状态</th><th>耗时</th><th>Attempts</th></tr></thead><tbody>'+rows+'</tbody></table></div>';}
+function renderEventDetail(e){const eventReason=reasonLabel(e.reason);const primary=['时间 '+fmtEventTime(e.at),'Model '+(e.model||'-'),'Policy '+(e.policy_name||'-'),'Rule '+(e.rule_name||'-'),'Strategy '+(e.strategy||'-'),'路由路径 '+eventRoutePath(e),'状态 '+eventStatusText(e),'耗时 '+(e.duration_ms||0)+' ms','Attempts '+((e.attempts||[]).length)].join(' · ');return '<div class="event-detail"><div class="small">'+esc(primary)+'</div>'+(eventReason?'<div style="margin-top:7px"><b>路由结果：</b>'+esc(eventReason)+'</div>':'')+'<div class="muted small" style="margin-top:6px">'+esc(e.trace_id?'Trace '+e.trace_id:'')+'</div><div style="font-weight:800;margin-top:12px">候选尝试</div><div class="attempts">'+((e.attempts||[]).length?(e.attempts||[]).map((a,i)=>renderAttempt(e,a,i)).join(''):'<div class="muted small">没有候选尝试记录</div>')+'</div></div>';}
+
+function renderEvents(){
+  if(!EVENT_DATA)return;
+  const xs=EVENT_DATA.events||[], source=EVENT_DATA.source==='sqlite'?'SQLite':'Memory';
+  $('eventResultMeta').textContent='数据源 '+source+' · 共 '+(EVENT_DATA.matched||0)+' 条';
+  if(!xs.length){$('events').innerHTML='<div class="empty">当前条件下暂无路由记录</div>';return;}
+  const rows=xs.map((e)=>{
+    const key=e.trace_id||e.at, expanded=EVENT_EXPANDED.has(key), state=eventState(e), attempts=(e.attempts||[]).length, path=eventRoutePath(e);
+    const row='<tr class="event-row '+(expanded?'expanded':'')+'" onclick="toggleEvent(\''+esc(key)+'\')"><td class="event-toggle"><span class="chevron">'+(expanded?'▾':'›')+'</span></td><td class="event-time mono">'+esc(fmtEventTime(e.at))+'</td><td><div class="event-primary ellipsis">'+esc(e.model||'-')+'</div></td><td><div class="event-primary">'+esc(e.policy_name||'-')+'</div></td><td class="route-path-cell"><div class="ellipsis" title="'+esc(path)+'">'+esc(path)+'</div></td><td><span class="event-state '+state.cls+'"><i></i>'+esc(state.label)+'</span></td><td><span class="attempt-count '+(attempts>1?'multi':'')+'">'+attempts+'</span></td><td>'+esc(e.duration_ms||0)+' ms</td></tr>';
+    return row+(expanded?'<tr class="event-detail-row"><td colspan="8">'+renderEventDetail(e)+'</td></tr>':'');
+  }).join('');
+  $('events').innerHTML='<div class="event-table-wrap"><table class="event-table route-record-table"><thead><tr><th></th><th>时间</th><th>Model</th><th>Policy</th><th>路由路径</th><th>结果</th><th>Attempts</th><th>耗时</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
+}
+
+function renderEventPager(){
+  const total=Number(EVENT_DATA?.matched||0);
+  const pages=Math.max(1,Math.ceil(total/ROUTE_PAGE_SIZE));
+  if(ROUTE_PAGE>pages)ROUTE_PAGE=pages;
+  const items=[];
+  const add=(p)=>{if(p>=1&&p<=pages&&!items.includes(p))items.push(p);};
+  add(1); for(let p=ROUTE_PAGE-2;p<=ROUTE_PAGE+2;p++)add(p); add(pages); items.sort((a,b)=>a-b);
+  let last=0, html='<button '+(ROUTE_PAGE<=1?'disabled':'')+' onclick="goRoutePage('+(ROUTE_PAGE-1)+')">‹</button>';
+  for(const p of items){if(last&&p-last>1)html+='<span class="muted">…</span>';html+='<button class="'+(p===ROUTE_PAGE?'active':'')+'" onclick="goRoutePage('+p+')">'+p+'</button>';last=p;}
+  html+='<button '+(ROUTE_PAGE>=pages?'disabled':'')+' onclick="goRoutePage('+(ROUTE_PAGE+1)+')">›</button><span class="muted small">'+ROUTE_PAGE_SIZE+' 条/页</span>';
+  $('eventPager').innerHTML=html;
+}
+async function goRoutePage(page){ROUTE_PAGE=Math.max(1,page);await loadEvents(false);}
 
 load().catch((e)=>{
   const target=$('dashboardPage')||document.body;

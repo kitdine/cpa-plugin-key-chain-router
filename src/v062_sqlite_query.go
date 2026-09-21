@@ -356,6 +356,10 @@ func querySQLiteEventsV62(db *sql.DB, q url.Values, obs ObservabilityConfig) (ma
 func sqliteWhereV62(q url.Values) (string, []any) {
     clauses := []string{`COALESCE(reason,'') <> 'no_policy'`}
     args := []any{}
+    if strings.EqualFold(strings.TrimSpace(q.Get("route_only")), "true") {
+        clauses = append(clauses, `decision IN (?,?)`)
+        args = append(args, decisionHandled, decisionFallbackToCPA)
+    }
     if cutoff := eventCutoffV6(strings.TrimSpace(q.Get("since"))); !cutoff.IsZero() {
         clauses = append(clauses, `at >= ?`)
         args = append(args, cutoff.Format(time.RFC3339Nano))
