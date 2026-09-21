@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+恢复基于 CPA 原生 request-scoped exact AuthID 的 credential 执行，不再依赖 prefix / 同一 CPA credential priority 才能完成 ordered failover。
+
+### Native exact AuthID pinning
+
+- 每个 KCR candidate 在调用 `host.model.execute[_stream]` 前解析 exact live `Auth.ID`，并通过 `auth_id` 与 `forced_provider` 传给 CPA。
+- execution ticket 绑定到与 host request 相同的 live Auth.ID，继续验证 KCR scheduler ownership，避免并发 credential reload 时二次 identity 解析发生漂移。
+- lower-priority fallback credential 由 CPA 的 request-scoped pin 在 priority tier 过滤前收窄；不修改全局 priority、prefix、OAuth token 或 CPA config。
+- 无效、disabled、不可用或 model-ineligible credential 继续 fail closed，不允许 CPA 静默换绑其它 credential。
+- ABI smoke 同时验证 non-stream / stream host callback 都携带 exact `auth_id` 与 `forced_provider`。
+- 推荐 CLIProxyAPI v7.3.10+；旧 CPA 仍保留 ticket/prefix 兼容路径，但可能受旧 priority pre-filter 限制。
+
+关联：#21、#25、#28；CPA upstream #5814、#5815。
+
 ## v0.6.7 - 2026-09-11
 
 修复 v0.6.6 Health-aware Failover 在 `plugin.reconfigure` / credential rotation 场景下的 runtime generation 竞态，避免旧 credential 的在途请求在重载后污染新 runtime 的 circuit health。
