@@ -231,6 +231,9 @@ func enabledV4Candidates(r *PolicyRule) []*PolicyCandidate {
 }
 
 func rankCandidatesV4(p *Policy, r *PolicyRule, headers http.Header, meta map[string]any) []*PolicyCandidate {
+	if p != nil {
+		normalizeClientAffinityV1(p)
+	}
 	cs := filterCandidatesByClientAffinityV1(p, enabledV4Candidates(r))
 	if len(cs) < 2 {
 		return cs
