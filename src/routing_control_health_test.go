@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -44,6 +45,21 @@ func TestRoutingControlFailureReleasesHalfOpenProbeWithoutClosingCircuit(t *test
 	}
 	if view.ConsecutiveFailures != 1 || view.BackoffLevel != 0 {
 		t.Fatalf("control failure changed candidate failure/backoff counters: %#v", view)
+	}
+}
+
+
+func TestAuthResolutionControlFailureDoesNotOpenCandidate(t *testing.T) {
+	resetIssue13Health(t)
+	p, r, ranked := issue13Fixture()
+	a := ranked[0]
+
+	err := fmt.Errorf("%w: exact auth pin: %w", errKCRAuthResolution, errors.New("host.auth.list unavailable"))
+	recordCandidateExecutionFailureV8(p, r, a, 0, err, nil, false)
+
+	view := candidateHealthViewV4(p, r, a)
+	if view.State != healthClosed || view.ConsecutiveFailures != 0 || view.ProbeInFlight {
+		t.Fatalf("auth resolution control failure mutated candidate health: %#v", view)
 	}
 }
 
