@@ -36,6 +36,8 @@ class PluginAPI(Structure):
 allocs=[]
 captured_ticket=None
 captured_model=None
+captured_auth_id=None
+captured_forced_provider=None
 emitted=[]
 output_closed=False
 upread=0
@@ -72,7 +74,7 @@ def claim_nested_ticket(ticket, model):
 
 @HOSTCALL
 def host_call(ctx, method, req, n, out):
-    global captured_ticket, captured_model, output_closed, upread, scheduler_second_pick_blocked, scheduler_first_pick_count, skip_scheduler_claim_once, unclaimed_host_error_once
+    global captured_ticket, captured_model, captured_auth_id, captured_forced_provider, output_closed, upread, scheduler_second_pick_blocked, scheduler_first_pick_count, skip_scheduler_claim_once, unclaimed_host_error_once
     m=method.decode()
     raw=bytes((c_uint8*n).from_address(addressof(req.contents))) if req and n else b'{}'
     payload=json.loads(raw or b'{}')
@@ -89,6 +91,8 @@ def host_call(ctx, method, req, n, out):
         if isinstance(vals,str): vals=[vals]
         captured_ticket=vals[0] if vals else None
         captured_model=payload.get('model')
+        captured_auth_id=payload.get('auth_id')
+        captured_forced_provider=payload.get('forced_provider')
         if captured_ticket:
             claim_nested_ticket(captured_ticket, captured_model)
         return_bytes(out, env_ok({'status_code':200,'headers':{'Content-Type':['text/event-stream']},'stream_id':'upstream-1'})); return 0
@@ -112,6 +116,8 @@ def host_call(ctx, method, req, n, out):
         if isinstance(vals,str): vals=[vals]
         captured_ticket=vals[0] if vals else None
         captured_model=payload.get('model')
+        captured_auth_id=payload.get('auth_id')
+        captured_forced_provider=payload.get('forced_provider')
         if captured_ticket and unclaimed_host_error_once:
             unclaimed_host_error_once=False
             return_bytes(out, json.dumps({'ok':False,'error':{'code':'upstream_failure','message':'simulated upstream 503'}}).encode()); return 1
@@ -188,6 +194,8 @@ with tempfile.TemporaryDirectory() as td:
     ex=pcall('executor.execute',{'Model':'gpt-anything','SourceFormat':'openai-response','Headers':{'Authorization':['Bearer '+key]},'OriginalRequest':base64.b64encode(b'{"model":"gpt-anything","input":"hi"}').decode(),'Payload':base64.b64encode(b'{"model":"gpt-anything","input":"hi"}').decode(),'Query':{},'Metadata':{},'host_callback_id':'cb1'})
     assert captured_ticket, 'executor did not issue ticket'
     assert captured_model=='gpt-anything', captured_model
+    assert captured_auth_id==LIVE_API_ID, captured_auth_id
+    assert captured_forced_provider=='codex', captured_forced_provider
     assert scheduler_first_pick_count >= 1, scheduler_first_pick_count
     assert not any(k.lower().startswith('x-kcr-') for k in (ex.get('Headers') or {}).keys())
 
@@ -244,6 +252,8 @@ with tempfile.TemporaryDirectory() as td:
     deadline=time.time()+2
     while not output_closed and time.time()<deadline: time.sleep(0.01)
     assert output_closed, 'plugin output stream was not closed'
+    assert captured_auth_id==LIVE_API_ID, captured_auth_id
+    assert captured_forced_provider=='codex', captured_forced_provider
     assert emitted and b'data:' in emitted[0], emitted
 
 plugin.shutdown()
