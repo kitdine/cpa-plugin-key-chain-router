@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.8.2 - 2026-09-21
+
+修复 v0.8.1 的资源别名与 Policy 编辑器遗留问题，并处理 PR #34 的全部 review findings。
+
+### 资源别名与下游 API Key 别名
+
+- 上游资源新增可编辑 KCR 别名；别名持久化在 KCR state 中，不修改 CPA config 或 OAuth 凭据。
+- 资源别名按稳定 credential identity 绑定，优先使用 AuthIndex，避免仅因 runtime Resource ID 变化而丢失。
+- 资源列表、Policy 候选资源和已选候选统一使用有效别名；同时保留 CPA 派生的默认资源名称，支持一键恢复默认。
+- 下游 API Key 不再维护独立别名副本，直接使用对应 Policy Name 作为别名；Policy API Key 下拉同时显示“Policy 名称 · Key Hint”。
+
+### Policy 编辑器修复
+
+- Sticky 策略选择“指定 Header”后新增 `Sticky Header` 输入框；后端同时校验 Header 名称不能为空，避免所有请求退化为同一 sticky key。
+- 候选资源搜索不再每输入一个字符重建整棵 Rule DOM，只更新资源池区域，解决输入框首字符后丢失焦点的问题。
+- 恢复完整的按错误类型 FailoverPolicy 配置：Network、401/403、408、409、429、5xx、Other，以及 Exhausted / Max Attempts。
+- 720px 以下不再隐藏唯一导航；窄屏改为底部一级导航，Dashboard / Policy / Resources / Usage / Settings 均可访问。
+
+### 测试
+
+- 新增资源别名稳定 identity、别名应用、下游 API Key Policy-name alias 和 Sticky Header 后端校验回归测试。
+- PR #36 通过 Go test、Go vet、JavaScript syntax、Linux amd64 c-shared build、ABI smoke 与 binary inspection。
+- PR #34 的 1 个 P1 和 3 个 P2 review threads 已全部修复并 resolve。
+
+关联：Issue #35、PR #36。
+
 ## v0.8.1 - 2026-09-21
 
 修正 v0.8.0 与已确认 Client Affinity 设计稿不一致的问题。v0.8.0 已从 Plugin Store 撤回，本版本重做管理界面并补齐 Client Type / Client Affinity 的数据模型分离。
