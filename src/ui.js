@@ -112,8 +112,10 @@ function clientProviderOptions() {
 
 function renderClientProviders() {
   const ps = clientProviderOptions();
+  const current = String(EDIT.client_provider || '').trim();
+  if (current && !ps.some((p) => p.toLowerCase() === current.toLowerCase())) ps.unshift(current);
   if (!EDIT.client_provider && ps.length) EDIT.client_provider = ps[0];
-  $('pClientProvider').innerHTML = ps.map((p) => '<option value="' + esc(p) + '" ' + (p === EDIT.client_provider ? 'selected' : '') + '>' + esc(p) + '</option>').join('');
+  $('pClientProvider').innerHTML = ps.map((p) => '<option value="' + esc(p) + '" ' + (p.toLowerCase() === String(EDIT.client_provider || '').toLowerCase() ? 'selected' : '') + '>' + esc(p) + (current && p.toLowerCase() === current.toLowerCase() && !(SNAP.resources || []).some((r) => String(r.provider || '').toLowerCase() === current.toLowerCase()) ? '（当前资源中不可见）' : '') + '</option>').join('');
 }
 
 function resourceAllowedByAffinity(r) {
