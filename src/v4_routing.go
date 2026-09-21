@@ -49,7 +49,7 @@ func handleModelRouteV4(raw []byte) ([]byte, error) {
 		observeV4(RoutingEvent{TraceID: traceIDV4(), At: nowV4(), Decision: decisionBypass, Reason: "rule_cpa_default", PolicyName: p.Name, KeyFingerprint: fp, KeyHint: p.KeyHint, RuleID: rule.ID, RuleName: rule.Name, Strategy: rule.Strategy, Model: model, Success: true}, callbackID)
 		return okEnvelope(map[string]any{"Handled": false, "Reason": "kcr_rule_cpa_default"})
 	}
-	if len(enabledV4Candidates(rule)) == 0 {
+	if len(filterCandidatesByClientAffinityV1(p, enabledV4Candidates(rule))) == 0 {
 		observeV4(RoutingEvent{TraceID: traceIDV4(), At: nowV4(), Decision: decisionBypass, Reason: "no_enabled_candidates", PolicyName: p.Name, KeyFingerprint: fp, KeyHint: p.KeyHint, RuleID: rule.ID, RuleName: rule.Name, Strategy: rule.Strategy, Model: model, Success: false}, callbackID)
 		return okEnvelope(map[string]any{"Handled": false, "Reason": "kcr_no_enabled_candidates"})
 	}
@@ -231,7 +231,7 @@ func enabledV4Candidates(r *PolicyRule) []*PolicyCandidate {
 }
 
 func rankCandidatesV4(p *Policy, r *PolicyRule, headers http.Header, meta map[string]any) []*PolicyCandidate {
-	cs := enabledV4Candidates(r)
+	cs := filterCandidatesByClientAffinityV1(p, enabledV4Candidates(r))
 	if len(cs) < 2 {
 		return cs
 	}
