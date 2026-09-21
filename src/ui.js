@@ -80,20 +80,76 @@ function availableKeys(editFp) {
 
 function openPolicy(fp) {
   EDIT = fp ? JSON.parse(JSON.stringify(SNAP.policies.find((x) => x.key_fingerprint === fp))) : {
-    name: '', key_fingerprint: '', key_hint: '', enabled: true, rules: []
+    name: '', key_fingerprint: '', key_hint: '', enabled: true, client_affinity: 'off', client_provider: '', rules: []
   };
   $('policyTitle').textContent = fp ? '编辑 Policy' : '新建 Policy';
   $('pName').value = EDIT.name || '';
   $('pEnabled').value = String(EDIT.enabled !== false);
+  EDIT.client_affinity = EDIT.client_affinity || 'off';
+  EDIT.client_provider = EDIT.client_provider || '';
+  $('pAffinity').value = EDIT.client_affinity;
+  renderClientProviders();
   const keys = availableKeys(fp);
   $('pKey').innerHTML = keys.map((k) => '<option value="' + esc(k.fingerprint) + '" data-hint="' +
     esc(k.hint) + '">' + esc(k.hint) + '</option>').join('');
   if (EDIT.key_fingerprint) $('pKey').value = EDIT.key_fingerprint;
+  renderAffinityState();
   renderRules();
   $('policyModal').classList.add('open');
 }
 
 function closePolicy() { $('policyModal').classList.remove('open'); }
+
+function clientProviderOptions() {
+  const seen = new Set();
+  return (SNAP.resources || []).filter((r) => String(r.kind || '').toLowerCase() !== 'oauth').map((r) => String(r.provider || '').trim()).filter((p) => p && !seen.has(p.toLowerCase()) && seen.add(p.toLowerCase())).sort();
+}
+
+function renderClientProviders() {
+  const ps = clientProviderOptions();
+  if (!EDIT.client_provider && ps.length) EDIT.client_provider = ps[0];
+  $('pClientProvider').innerHTML = ps.map((p) => '<option value="' + esc(p) + '" ' + (p === EDIT.client_provider ? 'selected' : '') + '>' + esc(p) + '</option>').join('');
+}
+
+function resourceAllowedByAffinity(r) {
+  if (!EDIT || EDIT.client_affinity !== 'strict') return true;
+  if (String(r.kind || '').toLowerCase() === 'oauth') return true;
+  return String(r.provider || '').toLowerCase() === String(EDIT.client_provider || '').toLowerCase();
+}
+
+function pruneAffinityCandidates() {
+  if (!EDIT || EDIT.client_affinity !== 'strict') return;
+  for (const rule of EDIT.rules || []) {
+    rule.candidates = (rule.candidates || []).filter((c) => {
+      const r = (SNAP.resources || []).find((x) => x.id === c.resource_id);
+      return r ? resourceAllowedByAffinity(r) : false;
+    });
+  }
+}
+
+function renderAffinityState() {
+  const strict = EDIT && EDIT.client_affinity === 'strict';
+  $('pClientProviderWrap').style.display = strict ? 'block' : 'none';
+  $('affinityNote').innerHTML = strict
+    ? 'Strict 已开启：<b>' + esc(EDIT.client_provider || '-') + '</b> 原生 API 资源可选；OAuth 不受 Provider 限制。Mixed / 多套规则仅预留，本期不实现。'
+    : 'Client Affinity 已关闭：候选资源不按客户端 Provider 过滤。';
+}
+
+function changeAffinity() {
+  EDIT.client_affinity = $('pAffinity').value;
+  if (EDIT.client_affinity !== 'strict') EDIT.client_provider = '';
+  else renderClientProviders();
+  pruneAffinityCandidates();
+  renderAffinityState();
+  renderRules();
+}
+
+function changeClientProvider() {
+  EDIT.client_provider = $('pClientProvider').value;
+  pruneAffinityCandidates();
+  renderAffinityState();
+  renderRules();
+}
 
 function defaultRule() {
   return {
@@ -170,7 +226,7 @@ function candidateMetrics(r, c) {
 }
 
 function resOptions(sel) {
-  return SNAP.resources.map((r) => '<option value="' + esc(r.id) + '" ' + (r.id === sel ? 'selected' : '') + '>' +
+  return SNAP.resources.filter(resourceAllowedByAffinity).map((r) => '<option value="' + esc(r.id) + '" ' + (r.id === sel ? 'selected' : '') + '>' +
     esc(r.kind + ' · ' + r.provider + ' · ' + r.display_name + (r.key_hint ? ' · ' + r.key_hint : '')) + '</option>').join('');
 }
 
@@ -199,8 +255,8 @@ function fromRes(r) {
 }
 
 function addCand(ri) {
-  const r = SNAP.resources[0];
-  if (!r) return alert('当前没有可选上游资源');
+  const r = SNAP.resources.find(resourceAllowedByAffinity);
+  if (!r) return alert('当前 Client Affinity 条件下没有可选上游资源');
   EDIT.rules[ri].candidates = EDIT.rules[ri].candidates || [];
   EDIT.rules[ri].candidates.push(fromRes(r));
   renderRules();
@@ -255,6 +311,8 @@ async function savePolicy() {
   EDIT.key_fingerprint = sel.value;
   EDIT.key_hint = hint;
   EDIT.enabled = $('pEnabled').value === 'true';
+  EDIT.client_affinity = $('pAffinity').value;
+  EDIT.client_provider = EDIT.client_affinity === 'strict' ? $('pClientProvider').value : '';
   SNAP = await api({ action: 'save_policy', payload: JSON.stringify(EDIT) });
   closePolicy();
   render();
