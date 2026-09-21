@@ -104,7 +104,34 @@ type envelope struct {
 	Result json.RawMessage `json:"result,omitempty"`
 	Error  *envelopeError  `json:"error,omitempty"`
 }
-type envelopeError struct{ Code, Message string }
+type envelopeError struct {
+	Code       string `json:"code"`
+	Message    string `json:"message"`
+	HTTPStatus int    `json:"http_status,omitempty"`
+}
+
+type hostCallbackError struct {
+	Code       string
+	Message    string
+	HTTPStatus int
+}
+
+func (e *hostCallbackError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if e.Code == "" {
+		return e.Message
+	}
+	return e.Code + ": " + e.Message
+}
+
+func (e *hostCallbackError) StatusCode() int {
+	if e == nil {
+		return 0
+	}
+	return e.HTTPStatus
+}
 
 type lifecycleRequest struct {
 	ConfigYAML    []byte `json:"config_yaml"`
@@ -990,6 +1017,12 @@ func statusFromError(err error) int {
 	if err == nil {
 		return 0
 	}
+	var statusErr interface{ StatusCode() int }
+	if errors.As(err, &statusErr) {
+		if status := statusErr.StatusCode(); status > 0 {
+			return status
+		}
+	}
 	m := statusRE.FindStringSubmatch(err.Error())
 	if len(m) > 1 {
 		n, _ := strconv.Atoi(m[1])
@@ -1742,7 +1775,7 @@ func callHost(method string, payload any) (json.RawMessage, error) {
 	}
 	if !env.OK {
 		if env.Error != nil {
-			return nil, fmt.Errorf("%s: %s", env.Error.Code, env.Error.Message)
+			return nil, &hostCallbackError{Code: env.Error.Code, Message: env.Error.Message, HTTPStatus: env.Error.HTTPStatus}
 		}
 		return nil, fmt.Errorf("host callback %s failed", method)
 	}
