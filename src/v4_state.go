@@ -259,8 +259,8 @@ func validatePolicy(p *Policy) error {
 	if p.ClientAffinity != clientAffinityOff && p.ClientAffinity != clientAffinityStrict {
 		return fmt.Errorf("不支持的 Client Affinity 模式 %q", p.ClientAffinity)
 	}
-	if p.ClientAffinity == clientAffinityStrict && p.ClientProvider == "" {
-		return errors.New("Client Affinity strict 模式必须选择客户端 Provider")
+	if p.ClientAffinity == clientAffinityStrict && effectiveClientProviderV81(p) == "" {
+		return errors.New("Client Affinity strict 模式必须选择客户端类型")
 	}
 	if len(p.Rules) == 0 {
 		return errors.New("至少需要一条模型规则")
@@ -278,7 +278,7 @@ func validatePolicy(p *Policy) error {
 		if p.ClientAffinity == clientAffinityStrict && r.Strategy != strategyCPADefault {
 			for _, c := range enabledV4Candidates(r) {
 				if !candidateAllowedByClientAffinityV1(p, c) {
-					return fmt.Errorf("规则 %s 的候选 %s 不符合 Client Affinity strict：仅允许 %s 原生 API 资源或 OAuth", r.Name, c.Name, p.ClientProvider)
+					return fmt.Errorf("规则 %s 的候选 %s 不符合 Client Affinity strict：仅允许 %s 原生 API 资源或 OAuth", r.Name, c.Name, effectiveClientProviderV81(p))
 				}
 			}
 		}
