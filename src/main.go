@@ -695,7 +695,7 @@ func handleSchedulerPick(raw []byte) ([]byte, error) {
 	}
 	authID, err := resolveAuthIDByIndex(rec.AuthIndex, provider)
 	if err != nil {
-		return nil, fmt.Errorf("kcr auth resolution failed: %w", err)
+		return nil, fmt.Errorf("%w: %w", errKCRAuthResolution, err)
 	}
 	candidates := anySlice(req["Candidates"])
 	if len(candidates) == 0 {
