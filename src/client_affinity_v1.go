@@ -12,9 +12,7 @@ func normalizeClientAffinityV1(p *Policy) {
 		return
 	}
 	p.ClientAffinity = strings.ToLower(strings.TrimSpace(p.ClientAffinity))
-	switch p.ClientAffinity {
-	case clientAffinityStrict:
-	default:
+	if p.ClientAffinity == "" {
 		p.ClientAffinity = clientAffinityOff
 	}
 	p.ClientProvider = strings.ToLower(strings.TrimSpace(p.ClientProvider))
