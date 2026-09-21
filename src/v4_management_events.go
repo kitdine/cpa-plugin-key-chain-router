@@ -28,6 +28,7 @@ func queryEventsV4(q url.Values) map[string]any {
 	model := strings.TrimSpace(q.Get("model"))
 	statusBucket := strings.TrimSpace(q.Get("status"))
 	cutoff := eventCutoffV6(strings.TrimSpace(q.Get("since")))
+	routeOnly := strings.EqualFold(strings.TrimSpace(q.Get("route_only")), "true")
 
 	events := make([]RoutingEvent, 0, minV6(limit, len(recent)))
 	matchedIndex := 0
@@ -62,6 +63,9 @@ func queryEventsV4(q url.Values) map[string]any {
 			addFacetV6(facetProviders, a.Provider)
 		}
 
+		if routeOnly && ev.Decision != decisionHandled && ev.Decision != decisionFallbackToCPA {
+			continue
+		}
 		if !eventMatchesV6(ev, search, decision, success, policy, strategy, provider, model, statusBucket, cutoff) {
 			continue
 		}
