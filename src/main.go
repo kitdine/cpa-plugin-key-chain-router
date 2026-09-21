@@ -104,7 +104,48 @@ type envelope struct {
 	Result json.RawMessage `json:"result,omitempty"`
 	Error  *envelopeError  `json:"error,omitempty"`
 }
-type envelopeError struct{ Code, Message string }
+type envelopeError struct {
+	Code       string `json:"code"`
+	Message    string `json:"message"`
+	HTTPStatus int    `json:"http_status,omitempty"`
+}
+
+type hostCallbackError struct {
+	Code       string
+	Message    string
+	HTTPStatus int
+}
+
+func (e *hostCallbackError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if e.Code == "" {
+		return e.Message
+	}
+	return e.Code + ": " + e.Message
+}
+
+func (e *hostCallbackError) StatusCode() int {
+	if e == nil {
+		return 0
+	}
+	return e.HTTPStatus
+}
+
+func isNativeExactPinSelectionError(err error) bool {
+	var hostErr *hostCallbackError
+	if !errors.As(err, &hostErr) || hostErr == nil {
+		return false
+	}
+	// Current CPA turns auth-manager selection failures that happen before any
+	// provider dispatch into this exact host callback envelope. Keep this narrow:
+	// any other unclaimed host error remains an ownership failure to avoid
+	// retrying a request that may already have reached an upstream.
+	return hostErr.Code == "host_call_failed" &&
+		hostErr.HTTPStatus == http.StatusServiceUnavailable &&
+		strings.TrimSpace(hostErr.Message) == "no auth available"
+}
 
 type lifecycleRequest struct {
 	ConfigYAML    []byte `json:"config_yaml"`
@@ -654,7 +695,7 @@ func handleSchedulerPick(raw []byte) ([]byte, error) {
 	}
 	authID, err := resolveAuthIDByIndex(rec.AuthIndex, provider)
 	if err != nil {
-		return nil, fmt.Errorf("kcr auth resolution failed: %w", err)
+		return nil, fmt.Errorf("%w: %w", errKCRAuthResolution, err)
 	}
 	candidates := anySlice(req["Candidates"])
 	if len(candidates) == 0 {
@@ -989,6 +1030,12 @@ var statusRE = regexp.MustCompile(`\b(400|401|403|404|408|409|422|429|500|502|50
 func statusFromError(err error) int {
 	if err == nil {
 		return 0
+	}
+	var statusErr interface{ StatusCode() int }
+	if errors.As(err, &statusErr) {
+		if status := statusErr.StatusCode(); status > 0 {
+			return status
+		}
 	}
 	m := statusRE.FindStringSubmatch(err.Error())
 	if len(m) > 1 {
@@ -1742,7 +1789,7 @@ func callHost(method string, payload any) (json.RawMessage, error) {
 	}
 	if !env.OK {
 		if env.Error != nil {
-			return nil, fmt.Errorf("%s: %s", env.Error.Code, env.Error.Message)
+			return nil, &hostCallbackError{Code: env.Error.Code, Message: env.Error.Message, HTTPStatus: env.Error.HTTPStatus}
 		}
 		return nil, fmt.Errorf("host callback %s failed", method)
 	}

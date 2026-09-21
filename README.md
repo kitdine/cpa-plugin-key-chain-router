@@ -4,7 +4,7 @@ CLIProxyAPI（CPA）v7 的动态策略路由插件。
 
 它保留 CPA 原生的下游 `api-keys` 认证、usage 与请求监控，在认证完成后，根据 **下游 API Key + Model + Policy/Rule** 选择具体的上游 OAuth / API credential，并提供 failover、轮询、权重、优先级、sticky 路由与可观测性。
 
-当前重点兼容：CLIProxyAPI v7.2.154（schema 5）、Linux amd64 / Debian Bookworm 类环境。
+当前重点兼容：CLIProxyAPI v7.3.10+（schema 5，包含 request-scoped exact AuthID pinning）、Linux amd64 / Debian Bookworm 类环境。
 
 > 版本变更记录请查看 `CHANGELOG.md` 与 GitHub Releases。README 只描述当前版本的用途和使用方式。
 
@@ -67,28 +67,29 @@ v0.7 起，KCR 明确区分 **持久 identity**、**CPA live Auth.ID** 与 **本
 ```text
 Policy Candidate
   → 精确解析当前 live Auth.ID
-  → 如该 credential 已有 CPA prefix 且目标 model 已注册：使用 prefix/model 缩小 provider/credential 范围
-  → X-CPA-Key-Chain-Ticket
-  → scheduler.pick
-  → 验证 exact live Auth.ID 确实存在于 CPA 本次 Candidates
-  → 返回 AuthID
+  → host.model.execute[_stream]
+       forced_provider = candidate provider
+       auth_id         = exact live Auth.ID
+  → CPA 在 credential priority 分层前先收窄到 exact credential
+  → X-CPA-Key-Chain-Ticket / scheduler.pick 再验证 ownership 与 exact Auth.ID
+  → 执行该 credential；无效、disabled、model-ineligible 或已移除时 fail closed
 ```
 
-### CPA priority / cooldown 预过滤与 KCR Priority 的区别
+已有 CPA `prefix` 仍可用于 model scope / alias 兼容，但从支持 request-scoped pinning 的 CPA 版本开始，**KCR 不再依赖 prefix 或同一 CPA priority 才能执行 lower-priority fallback credential**。
 
-KCR `Priority` 只决定 **KCR Rule 内候选顺序**；CPA credential 自身的 priority、cooldown、disabled/unavailable 状态属于 CPA 的更前置 eligibility 层。
+### CPA priority / cooldown 与 KCR Priority 的区别
 
-当前 CPA plugin ABI 的 `HostModelExecutionRequest` 没有 per-request `forced_provider` / `auth_id` hard-pin 字段，而且 plugin scheduler 收到的是 CPA 已完成 eligibility 与 credential-priority 预过滤后的 `Candidates`。因此 KCR **不会**通过临时修改全局 CPA credential priority 来绕过这一层，因为那会污染其他并发请求。
+KCR `Priority` 只决定 **KCR Rule 内候选顺序**；CPA credential 自身的 disabled、model eligibility 与 cooldown 仍由 CPA 最终执行层校验。
 
-v0.7 的处理方式：
+CLIProxyAPI v7.3.10+ 的 plugin host model callback 已支持 request-scoped `forced_provider` / `auth_id`。KCR 会把本次候选的 exact live Auth.ID 直接传给 CPA，因此 A → B → C 的 ordered failover 不再受“只把最高 credential-priority tier 交给 plugin scheduler”的旧限制影响，也不需要修改全局 priority、prefix、OAuth token 或 CPA config。
 
-- credential 已配置唯一 `prefix` 且该 model 已注册时，KCR 在 nested execution 前自动使用 `prefix/model`，先把 provider/credential 范围缩到目标 credential，再由 ticket 验证 exact Auth.ID。
-- failover 到另一 prefix credential 时会替换已有 credential prefix，不生成 `bar/foo/model`。
-- 不为未注册 model 伪造 prefix alias。
-- credential 无 prefix 时仍使用 exact Auth.ID scheduler pin；如果 CPA 已把目标 credential 预过滤掉，会明确报 `pinned credential is not eligible in the current CPA candidate set` 并按 KCR Failover 规则继续，而不是静默使用另一 credential。
-- `scheduler did not claim execution ticket` 表示 KCR 没有取得本次 nested execution 的 scheduler ownership；这类情况直接 fail closed，避免重复请求和错误归因。
+- lower-priority credential 可以被 request-scoped exact Auth.ID 直接选择；
+- 不存在、disabled、不可用或 model-ineligible 的 Auth.ID 由 CPA fail closed，不静默换到另一 credential；
+- KCR 仍保留 execution ticket claim 校验，确认 nested execution 确实经过 KCR scheduler ownership，防止成功/失败归因到错误候选；
+- stream 与 non-stream 使用同一套 exact pin 语义；
+- 对不支持该 host ABI 的旧 CPA，ticket/prefix 兼容路径仍存在，但可能重新暴露旧的 priority pre-filter 限制，因此不再作为推荐部署。
 
-诊断页会展示 live `auth_id`、实际 `execution_model`、credential prefix、identity 解析错误与 scope 提示，便于区分 KCR candidate 顺序和 CPA prefilter。
+诊断页继续展示 live `auth_id`、实际 `execution_model`、credential prefix、identity 解析错误与 scope 信息。
 
 ## 调度策略
 

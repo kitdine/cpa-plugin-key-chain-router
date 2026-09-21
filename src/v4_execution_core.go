@@ -77,23 +77,29 @@ func executeCandidateV4(c *PolicyCandidate, source, clientModel string, body []b
 	h := cloneHeader(headers)
 	h.Del(ticketHeader)
 	ticket := ""
-	var err error
-	if ticketIdentityForCandidateV10(c) == "" {
+	authID, err := liveIDForCandidateV10(c)
+	if err != nil {
+		err = fmt.Errorf("%w: exact auth pin: %w", errKCRAuthResolution, err)
+	} else if authID == "" {
 		err = errSchedulerTicketIssue
 	} else {
-		ticket = issueCandidateExecutionTicketV10(c)
+		// Bind the scheduler ownership ticket to the exact same live Auth.ID that
+		// is passed to CPA's request-scoped host execution pin. This preserves the
+		// existing fail-closed ownership check while avoiding a second identity
+		// resolution that could drift across a concurrent credential reload.
+		ticket = issueExecutionTicketV8(directLiveIdentityPrefixV10+authID, c.Provider)
 		if ticket == "" { err = errSchedulerTicketIssue } else { h.Set(ticketHeader, ticket) }
 	}
 	method := methodHostModelExecute
 	if stream { method = methodHostModelExecuteStream }
 	var raw json.RawMessage
 	if err == nil {
-		raw, err = callHost(method, map[string]any{"entry_protocol": source, "exit_protocol": source, "model": model, "stream": stream, "body": rewriteBodyModel(body, model), "headers": h, "query": query, "alt": alt, "host_callback_id": callbackID})
+		raw, err = callHost(method, map[string]any{"entry_protocol": source, "exit_protocol": source, "model": model, "stream": stream, "body": rewriteBodyModel(body, model), "headers": h, "query": query, "alt": alt, "host_callback_id": callbackID, "forced_provider": c.Provider, "auth_id": authID})
 	}
 	claimed := finishExecutionTicket(ticket)
 	ar := attemptResult{Candidate: c.Name, Provider: c.Provider, AuthIndex: c.AuthIndex, Model: model, Duration: time.Since(started)}
 	ar.DurationMs = ar.Duration.Milliseconds()
-	if ticket != "" && !claimed {
+	if ticket != "" && !claimed && !isNativeExactPinSelectionError(err) {
 		if stream && len(raw) > 0 {
 			var leaked hostModelStreamResponse
 			if json.Unmarshal(raw, &leaked) == nil && leaked.StreamID != "" { _ = closeHostStream(leaked.StreamID) }
