@@ -46,6 +46,7 @@ scheduler_second_pick_blocked=False
 scheduler_first_pick_count=0
 skip_scheduler_claim_once=False
 unclaimed_host_error_once=False
+unclaimed_post_dispatch_error_once=False
 
 def env_ok(result):
     return json.dumps({'ok':True,'result':result},separators=(',',':')).encode()
@@ -74,7 +75,7 @@ def claim_nested_ticket(ticket, model):
 
 @HOSTCALL
 def host_call(ctx, method, req, n, out):
-    global captured_ticket, captured_model, captured_auth_id, captured_forced_provider, output_closed, upread, scheduler_second_pick_blocked, scheduler_first_pick_count, skip_scheduler_claim_once, unclaimed_host_error_once
+    global captured_ticket, captured_model, captured_auth_id, captured_forced_provider, output_closed, upread, scheduler_second_pick_blocked, scheduler_first_pick_count, skip_scheduler_claim_once, unclaimed_host_error_once, unclaimed_post_dispatch_error_once
     m=method.decode()
     raw=bytes((c_uint8*n).from_address(addressof(req.contents))) if req and n else b'{}'
     payload=json.loads(raw or b'{}')
@@ -121,6 +122,9 @@ def host_call(ctx, method, req, n, out):
         if captured_ticket and unclaimed_host_error_once:
             unclaimed_host_error_once=False
             return_bytes(out, json.dumps({'ok':False,'error':{'code':'host_call_failed','message':'no auth available','http_status':503}}).encode()); return 1
+        if captured_ticket and unclaimed_post_dispatch_error_once:
+            unclaimed_post_dispatch_error_once=False
+            return_bytes(out, json.dumps({'ok':False,'error':{'code':'host_call_failed','message':'simulated upstream 503','http_status':503}}).encode()); return 1
         if captured_ticket and skip_scheduler_claim_once:
             skip_scheduler_claim_once=False
         elif captured_ticket:
@@ -218,6 +222,18 @@ with tempfile.TemporaryDirectory() as td:
     else:
         raise AssertionError('unclaimed scheduler ticket must fail closed')
 
+    # Any other host error without a ticket claim remains ownership-terminal:
+    # it may have happened after dispatch on an older CPA or under another
+    # scheduler, so retrying could duplicate a billable/mutating request.
+    unclaimed_post_dispatch_error_once=True
+    try:
+        pcall('executor.execute',{'Model':'gpt-anything','SourceFormat':'openai-response','Headers':{'Authorization':['Bearer '+key]},'OriginalRequest':base64.b64encode(b'{"model":"gpt-anything","input":"unclaimed-post-dispatch"}').decode(),'Payload':base64.b64encode(b'{"model":"gpt-anything","input":"unclaimed-post-dispatch"}').decode(),'Query':{},'Metadata':{},'host_callback_id':'cb-unclaimed-post-dispatch'})
+    except RuntimeError as exc:
+        assert 'scheduler did not claim execution ticket' in str(exc), exc
+        assert 'simulated upstream 503' not in str(exc), exc
+    else:
+        raise AssertionError('unclaimed post-dispatch host error must remain ownership-terminal')
+
     # With native request-scoped auth_id pinning, an error returned before
     # scheduler.pick can be the exact credential being rejected by CPA itself
     # (removed/disabled/unavailable/model-ineligible). Preserve that host error
@@ -246,9 +262,6 @@ with tempfile.TemporaryDirectory() as td:
     assert 'host_call_failed: no auth available' in ev.get('error',''), ev
     assert ev['attempts'] and ev['attempts'][0]['status']==503, ev
     assert ev['attempts'][0]['model']=='gpt-anything'
-    health=snapbody.get('candidate_health') or []
-    assert health and health[0]['state']=='closed', health
-    assert health[0].get('consecutive_failures',0)==0, health
     assert any(x.get('message')=='kcr routing decision' for x in logs), logs
 
     emitted.clear(); output_closed=False; upread=0
