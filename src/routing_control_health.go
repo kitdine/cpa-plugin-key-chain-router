@@ -1,9 +1,12 @@
 package main
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 )
+
+var errKCRAuthResolution = errors.New("kcr auth resolution failed")
 
 func isTerminalSchedulerControlFailureV8(err error) bool {
 	return err == errSchedulerTicketUnclaimed || err == errSchedulerTicketIssue
@@ -17,7 +20,7 @@ func isRoutingControlFailureV8(err error) bool {
 	if err == nil {
 		return false
 	}
-	if isTerminalSchedulerControlFailureV8(err) {
+	if isTerminalSchedulerControlFailureV8(err) || errors.Is(err, errKCRAuthResolution) {
 		return true
 	}
 	msg := strings.ToLower(err.Error())
