@@ -180,6 +180,7 @@ func normalizePolicies(st *V4State) {
 		if p.Name == "" {
 			p.Name = "策略 " + p.KeyHint
 		}
+		normalizeClientAffinityV1(p)
 		for _, r := range p.Rules {
 			normalizeRule(r)
 		}
@@ -254,6 +255,10 @@ func validatePolicy(p *Policy) error {
 	if strings.TrimSpace(p.KeyFingerprint) == "" {
 		return errors.New("请选择下游 CPA API Key")
 	}
+	normalizeClientAffinityV1(p)
+	if p.ClientAffinity == clientAffinityStrict && p.ClientProvider == "" {
+		return errors.New("Client Affinity strict 模式必须选择客户端 Provider")
+	}
 	if len(p.Rules) == 0 {
 		return errors.New("至少需要一条模型规则")
 	}
@@ -266,6 +271,13 @@ func validatePolicy(p *Policy) error {
 		normalizeRule(r)
 		if r.Strategy != strategyCPADefault && len(enabledV4Candidates(r)) == 0 {
 			return fmt.Errorf("规则 %s 没有启用候选", r.Name)
+		}
+		if p.ClientAffinity == clientAffinityStrict {
+			for _, c := range enabledV4Candidates(r) {
+				if !candidateAllowedByClientAffinityV1(p, c) {
+					return fmt.Errorf("规则 %s 的候选 %s 不符合 Client Affinity strict：仅允许 %s 原生 API 资源或 OAuth", r.Name, c.Name, p.ClientProvider)
+				}
+			}
 		}
 		for _, pat := range r.Models {
 			if pat == "*" {
