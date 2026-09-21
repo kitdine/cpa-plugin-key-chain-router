@@ -110,6 +110,7 @@ func normalizePolicyV4(p *Policy) {
 	if p.Name == "" {
 		p.Name = "策略 " + p.KeyHint
 	}
+	normalizeClientAffinityV1(p)
 	for _, r := range p.Rules {
 		normalizeRule(r)
 	}
