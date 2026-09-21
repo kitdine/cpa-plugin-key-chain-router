@@ -35,6 +35,7 @@ type V4State struct {
 	UpdatedAt     string              `json:"updated_at"`
 	Policies      map[string]*Policy  `json:"policies"`
 	Observability ObservabilityConfig `json:"observability"`
+	ResourceAliases map[string]string     `json:"resource_aliases,omitempty"`
 }
 
 type Policy struct {

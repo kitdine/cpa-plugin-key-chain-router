@@ -28,7 +28,7 @@ func handleAPIV4(req managementRequest) (map[string]any, error) {
 			return nil, fmt.Errorf("invalid policy payload: %w", err)
 		}
 		normalizePolicyV4(&p)
-		resources := resourcesWithExactIDsV10()
+		resources := resourcesWithAliasesV82()
 		tmp := V4State{Policies: map[string]*Policy{p.KeyFingerprint: &p}}
 		rebindPoliciesV4(&tmp, resources)
 		if rebound := tmp.Policies[p.KeyFingerprint]; rebound != nil {
@@ -55,6 +55,77 @@ func handleAPIV4(req managementRequest) (map[string]any, error) {
 		v4Runtime.Lock()
 		delete(v4Runtime.state.Policies, fp)
 		pruneCandidateHealthLockedV4()
+		v4Runtime.Unlock()
+		if err := saveV4State(); err != nil {
+			return nil, err
+		}
+		return buildSnapshotV4(), nil
+	case "save_resource_alias":
+		payload := payloadV4(req)
+		if len(payload) == 0 {
+			return nil, errors.New("payload is required")
+		}
+		var in struct {
+			ResourceID string `json:"resource_id"`
+			Alias      string `json:"alias"`
+		}
+		if err := json.Unmarshal(payload, &in); err != nil {
+			return nil, fmt.Errorf("invalid resource alias payload: %w", err)
+		}
+		in.ResourceID = strings.TrimSpace(in.ResourceID)
+		in.Alias = strings.TrimSpace(in.Alias)
+		if in.ResourceID == "" {
+			return nil, errors.New("resource_id is required")
+		}
+		if len([]rune(in.Alias)) > 120 {
+			return nil, errors.New("资源别名最多 120 个字符")
+		}
+		resources := resourcesWithExactIDsV10()
+		var target *apiResource
+		for i := range resources {
+			if strings.TrimSpace(resources[i].ID) == in.ResourceID {
+				target = &resources[i]
+				break
+			}
+		}
+		if target == nil {
+			return nil, errors.New("当前资源不存在，无法保存别名")
+		}
+		aliasKey := resourceAliasKeyV82(*target)
+		v4Runtime.Lock()
+		if v4Runtime.state.ResourceAliases == nil {
+			v4Runtime.state.ResourceAliases = map[string]string{}
+		}
+		if in.Alias == "" {
+			delete(v4Runtime.state.ResourceAliases, aliasKey)
+		} else {
+			v4Runtime.state.ResourceAliases[aliasKey] = in.Alias
+		}
+		for _, p := range v4Runtime.state.Policies {
+			if p == nil {
+				continue
+			}
+			for _, rule := range p.Rules {
+				if rule == nil {
+					continue
+				}
+				for _, cand := range rule.Candidates {
+					if cand == nil {
+						continue
+					}
+					matched := strings.TrimSpace(cand.ResourceID) == in.ResourceID ||
+						(strings.TrimSpace(cand.AuthIndex) != "" && strings.TrimSpace(cand.AuthIndex) == strings.TrimSpace(target.AuthIndex) &&
+							strings.EqualFold(strings.TrimSpace(cand.Provider), strings.TrimSpace(target.Provider)))
+					if matched {
+						if in.Alias != "" {
+							cand.Name = in.Alias
+						} else if strings.TrimSpace(target.DisplayName) != "" {
+							cand.Name = target.DisplayName
+						}
+					}
+				}
+			}
+		}
 		v4Runtime.Unlock()
 		if err := saveV4State(); err != nil {
 			return nil, err
@@ -118,15 +189,16 @@ func normalizePolicyV4(p *Policy) {
 
 func buildSnapshotV4() map[string]any {
 	keys, resources, configErr := currentEnvironment()
-	if exact := resourcesWithExactIDsV10(); len(exact) > 0 {
-		resources = exact
-	}
 	v4Runtime.RLock()
 	st := cloneV4State(v4Runtime.state)
 	recent := append([]RoutingEvent(nil), v4Runtime.recent...)
 	v4Runtime.RUnlock()
-
+	if exact := resourcesWithExactIDsV10(); len(exact) > 0 {
+		resources = exact
+	}
+	resources = applyResourceAliasesV82(resources, st.ResourceAliases)
 	rebindPoliciesV4(&st, resources)
+	keys = applyDownstreamAliasesV82(keys, st.Policies)
 	policies := make([]*Policy, 0, len(st.Policies))
 	for _, p := range st.Policies {
 		policies = append(policies, p)

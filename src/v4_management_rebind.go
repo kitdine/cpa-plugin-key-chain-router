@@ -28,7 +28,9 @@ func rebindPoliciesV4(st *V4State, resources []apiResource) {
 				if strings.TrimSpace(c.AuthID) == "" && strings.TrimSpace(x.AuthID) != "" {
 					c.AuthID = x.AuthID
 				}
-				if c.Name == "" {
+				if strings.TrimSpace(x.Alias) != "" {
+					c.Name = x.Alias
+				} else if c.Name == "" {
 					c.Name = x.DisplayName
 				}
 			}

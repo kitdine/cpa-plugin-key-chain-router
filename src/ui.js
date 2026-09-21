@@ -149,7 +149,10 @@ function openPolicy(fp) {
   $('pName').value = EDIT.name || '';
   $('pEnabled').value = String(EDIT.enabled !== false);
   const keys = availableKeys(fp);
-  $('pKey').innerHTML = keys.map((k) => '<option value="' + esc(k.fingerprint) + '" data-hint="' + esc(k.hint) + '">' + esc(k.hint) + '</option>').join('');
+  $('pKey').innerHTML = keys.map((k) => {
+    const label = k.alias ? k.alias + ' · ' + k.hint : k.hint;
+    return '<option value="' + esc(k.fingerprint) + '" data-hint="' + esc(k.hint) + '" data-alias="' + esc(k.alias || '') + '">' + esc(label) + '</option>';
+  }).join('');
   if (EDIT.key_fingerprint) $('pKey').value = EDIT.key_fingerprint;
   renderClientTypes();
   renderAffinityState();
@@ -226,6 +229,16 @@ function strategyOptions(v) {
   ].map(([k,n]) => '<option value="' + k + '" ' + (v===k?'selected':'') + '>' + n + '</option>').join('');
 }
 
+function failActionOptions(v) {
+  return [
+    ['next','下一个候选'],
+    ['same-priority-first','同优先级优先'],
+    ['next-priority','下一优先级'],
+    ['stop','停止'],
+    ['cpa-default','转 CPA 默认']
+  ].map(([k,n]) => '<option value="' + k + '" ' + (v===k?'selected':'') + '>' + n + '</option>').join('');
+}
+
 function strategyFields(s) {
   return {
     priority:s==='priority-weighted'||s==='sticky',
@@ -237,6 +250,10 @@ function resourceAllowedByAffinity(r) {
   if (!EDIT || EDIT.client_affinity !== 'strict') return true;
   if (String(r.kind || '').toLowerCase() === 'oauth') return true;
   return String(r.provider || '').toLowerCase() === String(EDIT.client_type || '').toLowerCase();
+}
+
+function resourceLabel(r) {
+  return r ? (r.alias || r.display_name || r.id || '-') : '-';
 }
 
 function resourceEndpoint(r) {
@@ -252,6 +269,34 @@ function candidateSelected(rule, res) {
   return (rule.candidates || []).some((c) => c.resource_id === res.id || (c.auth_index && res.auth_index && c.auth_index === res.auth_index && String(c.provider).toLowerCase() === String(res.provider).toLowerCase()));
 }
 
+function ruleResourcePoolHTML(r,ri) {
+  const query = String(RULE_SEARCH[ri] || '').toLowerCase();
+  const resources = (SNAP.resources || []).filter((x) => {
+    if (!query) return true;
+    return [x.alias,x.display_name,x.provider,x.base_url,x.key_hint,x.auth_index].some((v) => String(v || '').toLowerCase().includes(query));
+  });
+  const available = resources.filter(resourceAllowedByAffinity);
+  const filtered = resources.filter((x) => !resourceAllowedByAffinity(x));
+  let h = '<div class="info" style="margin-bottom:8px">' +
+    (EDIT.client_affinity==='strict'
+      ? '严格模式：匹配客户端 Provider 的原生资源和全部 OAuth 可选；其他原生 API 资源保留展示但被过滤。'
+      : 'Affinity 关闭：全部资源均可选择。') + '</div>';
+  h += resourcePoolTable(r,ri,available,false);
+  if (filtered.length) {
+    h += '<div class="candidate-title" style="margin-top:10px">已被 Client Affinity 过滤（'+filtered.length+'）</div>' +
+      resourcePoolTable(r,ri,filtered,true);
+  }
+  return h;
+}
+
+function updateRuleResourceSearch(ri,value) {
+  RULE_SEARCH[ri] = value;
+  const pool = $('rule-resource-pool-' + ri);
+  if (pool && EDIT && EDIT.rules && EDIT.rules[ri]) {
+    pool.innerHTML = ruleResourcePoolHTML(EDIT.rules[ri],ri);
+  }
+}
+
 function renderRules() {
   if (!EDIT) return;
   const rules = EDIT.rules || [];
@@ -261,28 +306,39 @@ function renderRules() {
   }
   $('rules').innerHTML = rules.map((r,ri) => {
     r.failover = r.failover || defaultRule().failover;
-    const query = String(RULE_SEARCH[ri] || '').toLowerCase();
-    const resources = (SNAP.resources || []).filter((x) => {
-      if (!query) return true;
-      return [x.display_name,x.provider,x.base_url,x.key_hint,x.auth_index].some((v) => String(v || '').toLowerCase().includes(query));
-    });
-    const available = resources.filter(resourceAllowedByAffinity);
-    const filtered = resources.filter((x) => !resourceAllowedByAffinity(x));
     const f = strategyFields(r.strategy);
     let h = '<div class="rule-card"><div class="rule-head"><span class="rule-num">' + (ri+1) + '</span><b>' + esc(r.name || '规则') + '</b><div class="rule-actions"><button class="btn small" onclick="moveRule(' + ri + ',-1)">↑</button><button class="btn small" onclick="moveRule(' + ri + ',1)">↓</button><button class="btn small danger" onclick="EDIT.rules.splice(' + ri + ',1);renderRules()">删除</button></div></div>';
     h += '<div class="grid3"><div><label>Rule 名称 *</label><input value="' + esc(r.name || '') + '" oninput="EDIT.rules['+ri+'].name=this.value"></div><div><label>匹配模型 *</label><input value="' + esc((r.models || ['*']).join(',')) + '" oninput="EDIT.rules['+ri+'].models=this.value.split(/[,;\\n]+/)"></div><div><label>路由策略 *</label><select onchange="EDIT.rules['+ri+'].strategy=this.value;renderRules()">' + strategyOptions(r.strategy) + '</select></div></div>';
-    h += '<div class="advanced" style="margin-top:12px"><div class="grid3"><div><label>Sticky</label><select onchange="EDIT.rules['+ri+'].sticky_source=this.value"><option value="auto" '+((r.sticky_source||'auto')==='auto'?'selected':'')+'>自动</option><option value="session" '+(r.sticky_source==='session'?'selected':'')+'>Session</option><option value="header" '+(r.sticky_source==='header'?'selected':'')+'>指定 Header</option></select></div><div><label>候选耗尽后</label><select onchange="EDIT.rules['+ri+'].failover.exhausted=this.value"><option value="error" '+(r.failover.exhausted!=='cpa-default'?'selected':'')+'>返回错误</option><option value="cpa-default" '+(r.failover.exhausted==='cpa-default'?'selected':'')+'>转 CPA 默认</option></select></div><div><label>Max Attempts</label><input type="number" min="0" value="'+(r.failover.max_attempts||0)+'" oninput="EDIT.rules['+ri+'].failover.max_attempts=+this.value||0"></div></div></div>';
+
+    let sticky = '';
+    if (r.strategy === 'sticky') {
+      sticky = '<div><label>Sticky 来源</label><select onchange="EDIT.rules['+ri+'].sticky_source=this.value;renderRules()"><option value="auto" '+((r.sticky_source||'auto')==='auto'?'selected':'')+'>自动</option><option value="session" '+(r.sticky_source==='session'?'selected':'')+'>Session</option><option value="header" '+(r.sticky_source==='header'?'selected':'')+'>指定 Header</option></select></div>';
+      if (r.sticky_source === 'header') {
+        sticky += '<div><label>Sticky Header *</label><input value="'+esc(r.sticky_header||'')+'" placeholder="例如：X-Session-Id" oninput="EDIT.rules['+ri+'].sticky_header=this.value"></div>';
+      }
+    }
+
+    h += '<div class="advanced" style="margin-top:12px"><div class="grid4">' +
+      sticky +
+      '<div><label>候选耗尽后</label><select onchange="EDIT.rules['+ri+'].failover.exhausted=this.value"><option value="error" '+(r.failover.exhausted!=='cpa-default'?'selected':'')+'>返回错误</option><option value="cpa-default" '+(r.failover.exhausted==='cpa-default'?'selected':'')+'>转 CPA 默认</option></select></div>' +
+      '<div><label>Max Attempts</label><input type="number" min="0" value="'+(r.failover.max_attempts||0)+'" oninput="EDIT.rules['+ri+'].failover.max_attempts=+this.value||0"></div>' +
+      '</div><div style="font-weight:800;margin:14px 0 8px">按错误类型的 Failover</div><div class="grid4">' +
+      '<div><label>网络错误</label><select onchange="EDIT.rules['+ri+'].failover.network=this.value">'+failActionOptions(r.failover.network)+'</select></div>' +
+      '<div><label>401 / 403</label><select onchange="EDIT.rules['+ri+'].failover.unauthorized=this.value">'+failActionOptions(r.failover.unauthorized)+'</select></div>' +
+      '<div><label>408 Timeout</label><select onchange="EDIT.rules['+ri+'].failover.timeout=this.value">'+failActionOptions(r.failover.timeout)+'</select></div>' +
+      '<div><label>409 Conflict</label><select onchange="EDIT.rules['+ri+'].failover.conflict=this.value">'+failActionOptions(r.failover.conflict)+'</select></div>' +
+      '<div><label>429 Rate Limit</label><select onchange="EDIT.rules['+ri+'].failover.rate_limit=this.value">'+failActionOptions(r.failover.rate_limit)+'</select></div>' +
+      '<div><label>5xx</label><select onchange="EDIT.rules['+ri+'].failover.server_error=this.value">'+failActionOptions(r.failover.server_error)+'</select></div>' +
+      '<div><label>其他错误</label><select onchange="EDIT.rules['+ri+'].failover.other=this.value">'+failActionOptions(r.failover.other)+'</select></div>' +
+      '</div></div>';
 
     if (r.strategy === 'cpa-default') {
       h += '<div class="oknote" style="margin-top:12px">命中此 Rule 时不执行候选资源，直接交给 CPA 默认路由。</div></div>';
       return h;
     }
 
-    h += '<div class="candidate-section"><div class="candidate-title">候选资源</div><div class="toolbar"><input class="search" value="'+esc(RULE_SEARCH[ri]||'')+'" placeholder="搜索资源别名、Provider 或 URL…" oninput="RULE_SEARCH['+ri+']=this.value;renderRules()"><span class="muted small">客户端类型：'+esc(clientTypeLabel(EDIT.client_type))+' · Client Affinity '+(EDIT.client_affinity==='strict'?'已开启':'未开启')+'</span></div>';
-    h += '<div class="info" style="margin-bottom:8px">'+(EDIT.client_affinity==='strict'?'严格模式：匹配客户端 Provider 的原生资源和全部 OAuth 可选；其他原生 API 资源保留展示但被过滤。':'Affinity 关闭：全部资源均可选择。')+'</div>';
-    h += resourcePoolTable(r,ri,available,false);
-    if (filtered.length) h += '<div class="candidate-title" style="margin-top:10px">已被 Client Affinity 过滤（'+filtered.length+'）</div>'+resourcePoolTable(r,ri,filtered,true);
-
+    h += '<div class="candidate-section"><div class="candidate-title">候选资源</div><div class="toolbar"><input class="search" value="'+esc(RULE_SEARCH[ri]||'')+'" placeholder="搜索资源别名、Provider 或 URL…" oninput="updateRuleResourceSearch('+ri+',this.value)"><span class="muted small">客户端类型：'+esc(clientTypeLabel(EDIT.client_type))+' · Client Affinity '+(EDIT.client_affinity==='strict'?'已开启':'未开启')+'</span></div>';
+    h += '<div id="rule-resource-pool-'+ri+'">' + ruleResourcePoolHTML(r,ri) + '</div>';
     h += '<div class="candidate-title" style="margin-top:14px">已选候选资源（'+(r.candidates||[]).length+'）</div>';
     h += selectedCandidatesTable(r,ri,f);
     h += '</div></div>';
@@ -296,7 +352,7 @@ function resourcePoolTable(rule,ri,resources,filtered) {
     resources.map((x) => {
       const st=resourceStatus(x), selected=candidateSelected(rule,x);
       const reason=filtered?'不匹配当前客户端类型（仅允许 '+clientTypeLabel(EDIT.client_type)+' 原生资源）':'';
-      return '<tr class="'+(filtered?'filtered':'')+'"><td><button class="add-btn" '+(filtered||selected?'disabled':'')+' onclick="addCand('+ri+',\''+esc(x.id)+'\')">＋</button></td><td><b>'+esc(x.display_name||x.id)+'</b></td><td><span class="tag '+(String(x.kind).toLowerCase()==='oauth'?'oauth':'api')+'">'+esc(x.kind||'-')+'</span></td><td><span class="tag">'+esc(x.provider||'-')+'</span></td><td>'+esc(String(x.kind).toLowerCase()==='oauth'?'账号':'URL')+'</td><td class="mono">'+esc(resourceEndpoint(x))+'</td><td><span class="tag '+(filtered?'filtered':st.ok?'ok':'')+'">'+esc(filtered?'已过滤':st.label)+'</span></td><td>'+(filtered?'<span class="muted small" title="'+esc(reason)+'">过滤原因 ⓘ</span>':selected?'<span class="muted small">已添加</span>':'<button class="btn small" onclick="addCand('+ri+',\''+esc(x.id)+'\')">添加</button>')+'</td></tr>';
+      return '<tr class="'+(filtered?'filtered':'')+'"><td><button class="add-btn" '+(filtered||selected?'disabled':'')+' onclick="addCand('+ri+',\''+esc(x.id)+'\')">＋</button></td><td><b>'+esc(resourceLabel(x))+'</b></td><td><span class="tag '+(String(x.kind).toLowerCase()==='oauth'?'oauth':'api')+'">'+esc(x.kind||'-')+'</span></td><td><span class="tag">'+esc(x.provider||'-')+'</span></td><td>'+esc(String(x.kind).toLowerCase()==='oauth'?'账号':'URL')+'</td><td class="mono">'+esc(resourceEndpoint(x))+'</td><td><span class="tag '+(filtered?'filtered':st.ok?'ok':'')+'">'+esc(filtered?'已过滤':st.label)+'</span></td><td>'+(filtered?'<span class="muted small" title="'+esc(reason)+'">过滤原因 ⓘ</span>':selected?'<span class="muted small">已添加</span>':'<button class="btn small" onclick="addCand('+ri+',\''+esc(x.id)+'\')">添加</button>')+'</td></tr>';
     }).join('') + '</tbody></table></div>';
 }
 
@@ -308,12 +364,12 @@ function selectedCandidatesTable(r,ri,f) {
       const res=(SNAP.resources||[]).find((x)=>x.id===c.resource_id);
       const allowed=!res||resourceAllowedByAffinity(res);
       const ep=res?resourceEndpoint(res):(c.auth_index||'当前资源不可见');
-      return '<tr draggable="true" ondragstart="dragCandidate('+ri+','+ci+')" ondragover="event.preventDefault()" ondrop="dropCandidate('+ri+','+ci+')" '+(!allowed?'class="filtered"':'')+'><td class="drag">⋮⋮</td><td><b>'+esc(c.name||res?.display_name||'-')+'</b>'+(!res?'<div class="warn small">当前资源不可见</div>':!allowed?'<div class="warn small">当前 Affinity 不允许</div>':'')+'</td><td><span class="tag '+(String(c.resource_kind||res?.kind).toLowerCase()==='oauth'?'oauth':'api')+'">'+esc(c.resource_kind||res?.kind||'-')+'</span></td><td><span class="tag">'+esc(c.provider||res?.provider||'-')+'</span></td><td class="mono">'+esc(ep)+'</td>'+(f.priority?'<td><input type="number" value="'+(c.priority||100)+'" oninput="EDIT.rules['+ri+'].candidates['+ci+'].priority=+this.value||100"></td>':'')+(f.weight?'<td><input type="number" min="1" value="'+(c.weight||1)+'" oninput="EDIT.rules['+ri+'].candidates['+ci+'].weight=+this.value||1"></td>':'')+'<td><input value="'+esc(c.override_model||'')+'" placeholder="留空 = 沿用客户端请求模型" oninput="EDIT.rules['+ri+'].candidates['+ci+'].override_model=this.value"></td><td><select onchange="EDIT.rules['+ri+'].candidates['+ci+'].enabled=this.value===\'true\'"><option value="true" '+(c.enabled!==false?'selected':'')+'>● 启用</option><option value="false" '+(c.enabled===false?'selected':'')+'>停用</option></select></td><td><button class="btn small danger" onclick="EDIT.rules['+ri+'].candidates.splice('+ci+',1);renderRules()">删除</button></td></tr>';
+      return '<tr draggable="true" ondragstart="dragCandidate('+ri+','+ci+')" ondragover="event.preventDefault()" ondrop="dropCandidate('+ri+','+ci+')" '+(!allowed?'class="filtered"':'')+'><td class="drag">⋮⋮</td><td><b>'+esc(res ? resourceLabel(res) : (c.name||'-'))+'</b>'+(!res?'<div class="warn small">当前资源不可见</div>':!allowed?'<div class="warn small">当前 Affinity 不允许</div>':'')+'</td><td><span class="tag '+(String(c.resource_kind||res?.kind).toLowerCase()==='oauth'?'oauth':'api')+'">'+esc(c.resource_kind||res?.kind||'-')+'</span></td><td><span class="tag">'+esc(c.provider||res?.provider||'-')+'</span></td><td class="mono">'+esc(ep)+'</td>'+(f.priority?'<td><input type="number" value="'+(c.priority||100)+'" oninput="EDIT.rules['+ri+'].candidates['+ci+'].priority=+this.value||100"></td>':'')+(f.weight?'<td><input type="number" min="1" value="'+(c.weight||1)+'" oninput="EDIT.rules['+ri+'].candidates['+ci+'].weight=+this.value||1"></td>':'')+'<td><input value="'+esc(c.override_model||'')+'" placeholder="留空 = 沿用客户端请求模型" oninput="EDIT.rules['+ri+'].candidates['+ci+'].override_model=this.value"></td><td><select onchange="EDIT.rules['+ri+'].candidates['+ci+'].enabled=this.value===\'true\'"><option value="true" '+(c.enabled!==false?'selected':'')+'>● 启用</option><option value="false" '+(c.enabled===false?'selected':'')+'>停用</option></select></td><td><button class="btn small danger" onclick="EDIT.rules['+ri+'].candidates.splice('+ci+',1);renderRules()">删除</button></td></tr>';
     }).join('')+'</tbody></table></div>';
 }
 
 function fromRes(r) {
-  return {id:'',name:r.display_name,resource_id:r.id,resource_kind:r.kind,provider:r.provider,auth_id:r.auth_id||'',auth_index:r.auth_index||'',override_model:'',enabled:true,priority:100,weight:1};
+  return {id:'',name:resourceLabel(r),resource_id:r.id,resource_kind:r.kind,provider:r.provider,auth_id:r.auth_id||'',auth_index:r.auth_index||'',override_model:'',enabled:true,priority:100,weight:1};
 }
 
 function addCand(ri,id) {
@@ -408,7 +464,7 @@ function renderResources() {
     if (provider!=='all' && String(r.provider)!==provider) return false;
     if (status==='active' && !st.ok) return false;
     if (status==='disabled' && st.ok) return false;
-    if (q && ![r.display_name,r.provider,r.base_url,r.key_hint,r.auth_index].some((v)=>String(v||'').toLowerCase().includes(q))) return false;
+    if (q && ![r.alias,r.display_name,r.provider,r.base_url,r.key_hint,r.auth_index].some((v)=>String(v||'').toLowerCase().includes(q))) return false;
     return true;
   });
   if (!xs.length) { $('resourceTable').innerHTML='<div class="empty">没有符合条件的上游资源</div>'; return; }
@@ -416,7 +472,7 @@ function renderResources() {
     xs.map((r)=>{
       const st=resourceStatus(r);
       const compat=String(r.kind).toLowerCase()==='oauth'?'通用 / 转换':clientTypeLabel(r.provider);
-      return '<tr><td><b>'+esc(r.display_name||r.id)+'</b></td><td><span class="tag '+(String(r.kind).toLowerCase()==='oauth'?'oauth':'api')+'">'+esc(r.kind||'-')+'</span></td><td><span class="tag">'+esc(r.provider||'-')+'</span></td><td class="mono">'+esc(resourceEndpoint(r))+'</td><td>'+esc(r.prefix||'—')+'</td><td>'+esc(compat)+'</td><td><span class="dot '+(st.ok?'':'warn')+'"></span>'+esc(st.label)+'</td><td><button class="btn small" onclick="openResourceDrawer(\''+esc(r.id)+'\')">查看</button></td></tr>';
+      return '<tr><td><b>'+esc(resourceLabel(r))+'</b>'+(r.alias?'<div class="muted small">默认：'+esc(r.display_name||r.id)+'</div>':'')+'</td><td><span class="tag '+(String(r.kind).toLowerCase()==='oauth'?'oauth':'api')+'">'+esc(r.kind||'-')+'</span></td><td><span class="tag">'+esc(r.provider||'-')+'</span></td><td class="mono">'+esc(resourceEndpoint(r))+'</td><td>'+esc(r.prefix||'—')+'</td><td>'+esc(compat)+'</td><td><span class="dot '+(st.ok?'':'warn')+'"></span>'+esc(st.label)+'</td><td><button class="btn small" onclick="openResourceDrawer(\''+esc(r.id)+'\')">查看 / 修改</button></td></tr>';
     }).join('')+'</tbody></table></div>';
 }
 
@@ -424,8 +480,8 @@ function openResourceDrawer(id) {
   const r=(SNAP.resources||[]).find((x)=>x.id===id);
   if (!r) return;
   const st=resourceStatus(r);
-  $('resourceDrawerBody').innerHTML='<div class="info" style="margin-top:16px">KCR 从 CPA 实时读取资源。凭据、Base URL 与 OAuth 授权请在 CPA 中维护；这里提供 Policy 路由视角的统一详情。</div>'+
-    '<div class="kv"><label>资源别名</label><div class="value"><b>'+esc(r.display_name||r.id)+'</b></div></div>'+
+  $('resourceDrawerBody').innerHTML='<div class="info" style="margin-top:16px">KCR 从 CPA 实时读取凭据与 Endpoint；资源别名仅保存在 KCR，用于 Policy 选择和路由可读性，不修改 CPA config。</div>'+
+    '<div class="kv"><label>资源别名</label><input id="resourceAliasInput" value="'+esc(r.alias||'')+'" placeholder="'+esc(r.display_name||r.id)+'"><div class="row" style="margin-top:8px"><button class="btn primary small" onclick="saveResourceAlias(\''+esc(r.id)+'\')">保存别名</button>'+(r.alias?'<button class="btn small" onclick="resetResourceAlias(\''+esc(r.id)+'\')">恢复默认</button>':'')+'</div><div class="muted small" style="margin-top:6px">默认名称：'+esc(r.display_name||r.id)+'</div></div>'+
     '<div class="grid2" style="margin-top:14px"><div class="kv" style="margin:0"><label>资源类型</label><div class="value">'+esc(r.kind||'-')+'</div></div><div class="kv" style="margin:0"><label>Provider</label><div class="value">'+esc(r.provider||'-')+'</div></div></div>'+
     '<div class="kv"><label>Endpoint / 账号</label><div class="value mono">'+esc(resourceEndpoint(r))+'</div></div>'+
     '<div class="grid2" style="margin-top:14px"><div class="kv" style="margin:0"><label>Prefix</label><div class="value">'+esc(r.prefix||'—')+'</div></div><div class="kv" style="margin:0"><label>状态</label><div class="value">'+esc(st.label)+'</div></div></div>'+
@@ -435,6 +491,28 @@ function openResourceDrawer(id) {
   $('resourceBackdrop').classList.add('open');
   $('resourceDrawer').classList.add('open');
 }
+
+async function saveResourceAlias(id) {
+  try {
+    const alias = $('resourceAliasInput').value.trim();
+    SNAP = await api({action:'save_resource_alias',payload:JSON.stringify({resource_id:id,alias})});
+    renderAll();
+    openResourceDrawer(id);
+  } catch (e) {
+    alert('保存资源别名失败：' + (e.message || e));
+  }
+}
+
+async function resetResourceAlias(id) {
+  try {
+    SNAP = await api({action:'save_resource_alias',payload:JSON.stringify({resource_id:id,alias:''})});
+    renderAll();
+    openResourceDrawer(id);
+  } catch (e) {
+    alert('恢复默认别名失败：' + (e.message || e));
+  }
+}
+
 function closeResourceDrawer(){ $('resourceBackdrop').classList.remove('open'); $('resourceDrawer').classList.remove('open'); }
 
 function renderObs() {
