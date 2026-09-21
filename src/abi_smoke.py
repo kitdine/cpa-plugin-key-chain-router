@@ -218,16 +218,19 @@ with tempfile.TemporaryDirectory() as td:
     else:
         raise AssertionError('unclaimed scheduler ticket must fail closed')
 
-    # The same ownership rule must override a host-side error. Otherwise an
-    # error produced by another scheduler would be attributed to the KCR
-    # candidate and could poison its health/cooldown state.
+    # With native request-scoped auth_id pinning, an error returned before
+    # scheduler.pick can be the exact credential being rejected by CPA itself
+    # (removed/disabled/unavailable/model-ineligible). Preserve that host error
+    # so KCR failover can continue; only an unclaimed host success is treated as
+    # scheduler ownership loss.
     unclaimed_host_error_once=True
     try:
         pcall('executor.execute',{'Model':'gpt-anything','SourceFormat':'openai-response','Headers':{'Authorization':['Bearer '+key]},'OriginalRequest':base64.b64encode(b'{"model":"gpt-anything","input":"unclaimed-error"}').decode(),'Payload':base64.b64encode(b'{"model":"gpt-anything","input":"unclaimed-error"}').decode(),'Query':{},'Metadata':{},'host_callback_id':'cb-unclaimed-error'})
     except RuntimeError as exc:
-        assert 'scheduler did not claim execution ticket' in str(exc), exc
+        assert 'simulated upstream 503' in str(exc), exc
+        assert 'scheduler did not claim execution ticket' not in str(exc), exc
     else:
-        raise AssertionError('unclaimed host error must be classified as routing ownership failure')
+        raise AssertionError('native exact-pin rejection must remain an actionable host error')
 
     diag=pcall('management.handle',{'Method':'GET','Path':'/v0/resource/plugins/key-chain-router/api','Query':{'action':['diagnose'],'fingerprint':[fp],'model':['gpt-anything']},'Headers':{},'Body':''})
     diagbody=json.loads(base64.b64decode(diag['Body']))
@@ -240,7 +243,7 @@ with tempfile.TemporaryDirectory() as td:
     assert snapbody['recent_events'], 'no routing event recorded'
     ev=snapbody['recent_events'][0]
     assert ev['decision']=='KCR_HANDLED' and ev['success'] is False, ev
-    assert 'scheduler did not claim execution ticket' in ev.get('error',''), ev
+    assert 'simulated upstream 503' in ev.get('error',''), ev
     assert ev['attempts'][0]['model']=='gpt-anything'
     health=snapbody.get('candidate_health') or []
     assert health and health[0]['state']=='closed', health
