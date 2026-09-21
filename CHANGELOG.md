@@ -1,6 +1,35 @@
 # Changelog
 
-## v0.8.0 - 2026-09-21
+## v0.8.1 - 2026-09-21
+
+修正 v0.8.0 与已确认 Client Affinity 设计稿不一致的问题。v0.8.0 已从 Plugin Store 撤回，本版本重做管理界面并补齐 Client Type / Client Affinity 的数据模型分离。
+
+### 管理界面重构
+
+- 重建 KCR 管理台信息架构：仪表盘、Policy、上游资源、使用统计、系统设置五个一级页面。
+- 新建 / 编辑 Policy 改为独立页面，不再使用旧版弹窗。
+- Policy 基础信息明确拆分“客户端类型”和“Client Affinity”：客户端类型始终保存；Affinity 仅决定是否启用严格资源过滤。
+- Client Affinity 关闭时，全部资源均可选择；Strict 开启时，仅匹配客户端类型的原生 Provider 资源 + 全部 OAuth 资源可选。
+- 被 Affinity 过滤的资源仍保留在候选资源表中，并显示过滤状态与原因，不再从 UI 中消失。
+- 候选资源选择改为完整资源表；已选候选使用独立有序表格，支持拖拽排序、Priority、Weight、模型重写和状态控制。
+- 新增一级“上游资源”页面，统一展示 API / OAuth 资源、Provider、Endpoint / 账号、Prefix、客户端适配和健康状态，并提供资源详情抽屉。
+- 路由记录与可观测性功能分别迁移到“使用统计”和“系统设置”，保留现有查询、统计和 SQLite 能力。
+
+### Client Type 兼容迁移
+
+- 新增持久化字段 `client_type`，不再把客户端身份和 Affinity Provider 混为同一个字段。
+- v0.8.0 Strict Policy 自动从历史 `client_provider` 迁移到 `client_type`。
+- Affinity Off 时 `client_type` 继续保留，`client_provider` 仅作为 Strict 运行时兼容字段。
+- 未知 / 未来 Affinity 模式继续 fail closed。
+
+### 测试
+
+- PR #34 通过 Go test、Go vet、JavaScript syntax、Linux amd64 c-shared build、ABI smoke 与 binary inspection。
+- 新增 Client Type 持久化和 v0.8.0 Strict Policy 迁移回归测试。
+
+关联：Issue #33、PR #34。
+
+## v0.8.0 - 2026-09-21（已撤回）
 
 新增 Client Affinity v1，使 Policy 可以显式约束原生 API Provider，同时继续允许 OAuth 资源参与候选链。
 
