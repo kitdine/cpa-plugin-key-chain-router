@@ -725,21 +725,34 @@ async function saveObs() {
 async function clearMemory(){ SNAP=await api({action:'clear_memory'}); await loadEvents(); }
 
 function eventParams() {
-  const q={action:'events',limit:$('eventLimit')?.value||'200'};
-  for (const [k,id] of [['q','eventSearch'],['decision','eventDecision'],['success','eventSuccess'],['policy','eventPolicy'],['strategy','eventStrategy'],['provider','eventProvider'],['model','eventModel'],['status','eventStatus'],['since','eventSince']]) {
+  const q={
+    action:'events',
+    route_only:'true',
+    limit:String(ROUTE_PAGE_SIZE),
+    offset:String((ROUTE_PAGE-1)*ROUTE_PAGE_SIZE),
+    since:$('eventSince')?.value||'1h'
+  };
+  for (const [k,id] of [['policy','eventPolicy'],['provider','eventProvider'],['model','eventModel']]) {
     const v=$(id)?.value;
     if (v && v!=='all') q[k]=v;
   }
   return q;
 }
 
-async function loadEvents() {
+async function loadEvents(resetPage=false) {
   if (!$('events')) return;
+  if (resetPage) ROUTE_PAGE=1;
   try {
-    EVENT_DATA=await api(eventParams());
+    const params=eventParams();
+    const statsParams=routeStatsParams(params.since);
+    const [events,stats]=await Promise.all([api(params),api(statsParams)]);
+    EVENT_DATA=events;
+    ROUTE_STATS=stats;
     renderEventFacets(EVENT_DATA.facets||{});
-    renderEventStats(EVENT_DATA.stats||{});
+    renderEventStats(ROUTE_STATS.stats||{});
+    renderRouteAnalysis();
     renderEvents();
+    renderEventPager();
   } catch(e) {
     $('events').innerHTML='<div class="note">查询失败：'+esc(e.message||e)+'</div>';
   }
@@ -751,22 +764,116 @@ function setFacet(id,values,allLabel) {
   el.innerHTML='<option value="all">'+esc(allLabel)+'</option>'+(values||[]).map((v)=>'<option value="'+esc(v)+'">'+esc(v)+'</option>').join('');
   if ([...el.options].some((o)=>o.value===current)) el.value=current;
 }
-function renderEventFacets(f){setFacet('eventPolicy',f.policies,'全部 Policy');setFacet('eventStrategy',f.strategies,'全部 Strategy');setFacet('eventProvider',f.providers,'全部 Provider');setFacet('eventModel',f.models,'全部 Model');}
-function fmtNumber(v,d=0){const n=Number(v||0);return Number.isFinite(n)?n.toFixed(d):'0';}
-function renderEventStats(s) {
-  const cards=[['匹配请求',fmtNumber(s.total),'当前筛选'],['成功率',fmtNumber(s.success_rate,1)+'%',(s.success||0)+' 成功 / '+(s.failed||0)+' 失败'],['平均耗时',fmtNumber(s.avg_duration_ms)+' ms','端到端路由耗时'],['P95 耗时',fmtNumber(s.p95_duration_ms)+' ms','当前筛选'],['Fallback',fmtNumber(s.fallback),'转入 CPA 默认路由'],['平均尝试',fmtNumber(s.avg_attempts,2),'每个请求的候选次数']];
-  $('eventStats').innerHTML=cards.map(([n,v,h])=>'<div class="stat"><div class="muted small">'+esc(n)+'</div><b>'+esc(v)+'</b><div class="hint">'+esc(h)+'</div></div>').join('');
+function renderEventFacets(f){
+  setFacet('eventPolicy',f.policies,'全部');
+  setFacet('eventProvider',f.providers,'全部');
+  setFacet('eventModel',f.models,'全部');
 }
-function resetEventFilters(){for(const id of ['eventSearch']) if($(id))$(id).value='';for(const id of ['eventDecision','eventSuccess','eventPolicy','eventStrategy','eventProvider','eventModel','eventStatus','eventSince'])if($(id))$(id).value='all';if($('eventLimit'))$('eventLimit').value='200';loadEvents();}
+function fmtNumber(v,d=0){const n=Number(v||0);return Number.isFinite(n)?n.toFixed(d):'0';}
+
+function renderEventStats(s) {
+  const total=Number(s.total||0), direct=Number(s.direct||0), fallback=Number(s.fallback||0), failed=Number(s.failed||0);
+  const cards=[
+    ['总请求',total,'当前筛选'],
+    ['直接成功',direct,pct(direct,total)],
+    ['Fallback',fallback,pct(fallback,total)],
+    ['失败',failed,pct(failed,total)]
+  ];
+  $('eventStats').innerHTML=cards.map(([n,v,h],i)=>'<div class="stat"><div class="muted small">'+esc(n)+'</div><b>'+esc(v)+'</b><div class="hint '+(i===2?'warn':i===3?'red':'green')+'">'+esc(h)+'</div></div>').join('');
+}
+
+function renderRouteAnalysis() {
+  if (!ROUTE_STATS) return;
+  renderCandidateHits(ROUTE_STATS.candidate_hits||[]);
+  renderFallbackPaths(ROUTE_STATS.fallback_paths||[]);
+  renderFailureReasons(ROUTE_STATS.failure_reasons||[]);
+  renderAttemptsDistribution(ROUTE_STATS.attempts||[], Number(ROUTE_STATS.stats?.total||0));
+}
+
+function renderCandidateHits(xs) {
+  if (!xs.length) { $('candidateHitChart').innerHTML='<div class="empty">暂无候选命中数据</div>'; return; }
+  $('candidateHitChart').innerHTML='<div class="bar-list">'+xs.slice(0,8).map((x)=>{
+    const total=Number(x.direct||0)+Number(x.fallback||0)+Number(x.failed||0);
+    const d=total?Number(x.direct||0)*100/total:0, f=total?Number(x.fallback||0)*100/total:0, e=total?Number(x.failed||0)*100/total:0;
+    return '<div class="bar-row"><div><b>'+esc(x.name)+'</b></div><div class="bar-track" title="首选 '+x.direct+' · Fallback '+x.fallback+' · 失败 '+x.failed+'"><span class="bar-direct" style="width:'+d+'%"></span><span class="bar-fallback" style="width:'+f+'%"></span><span class="bar-failed" style="width:'+e+'%"></span></div><div class="bar-values">'+fmtNumber(d,0)+'% / '+fmtNumber(f,0)+'%</div></div>';
+  }).join('')+'</div><div class="legend" style="margin-top:12px"><span><i style="background:#32bd82"></i>首选命中</span><span><i style="background:#f5bb58"></i>Fallback 命中</span><span><i style="background:#ee7773"></i>最终失败</span></div>';
+}
+
+function renderFallbackPaths(xs) {
+  if (!xs.length) { $('fallbackPathChart').innerHTML='<div class="empty">当前筛选没有 Fallback</div>'; return; }
+  const max=Math.max(1,...xs.map((x)=>Number(x.count||0)));
+  $('fallbackPathChart').innerHTML='<div class="bar-list">'+xs.slice(0,8).map((x)=>
+    '<div class="bar-row"><div class="ellipsis" title="'+esc(x.name)+'"><b>'+esc(x.name)+'</b></div><div class="bar-track"><span class="bar-single" style="width:'+(Number(x.count||0)*100/max)+'%"></span></div><div class="bar-values">'+esc(x.count)+' · '+fmtNumber(x.share,1)+'%</div></div>'
+  ).join('')+'</div>';
+}
+
+function renderFailureReasons(xs) {
+  if (!xs.length) { $('failureReasonChart').innerHTML='<div class="empty">当前筛选没有失败请求</div>'; return; }
+  const max=Math.max(1,...xs.map((x)=>Number(x.count||0)));
+  $('failureReasonChart').innerHTML='<div class="bar-list">'+xs.slice(0,7).map((x)=>
+    '<div class="failure-row"><div>'+esc(x.name)+'</div><div class="bar-track"><span class="failure-bar" style="width:'+(Number(x.count||0)*100/max)+'%"></span></div><b>'+esc(x.count)+'</b><span class="muted">'+fmtNumber(x.share,1)+'%</span></div>'
+  ).join('')+'</div>';
+}
+
+function renderAttemptsDistribution(xs,total) {
+  if (!xs.length || !total) { $('attemptsChart').innerHTML='<div class="empty">暂无 Attempts 数据</div>'; return; }
+  const colors=['#2fc184','#f5bb58','#4f8bf7','#ef6a67','#94a3b8'];
+  let acc=0;
+  const stops=[];
+  xs.forEach((x,i)=>{
+    const p=Number(x.share||0), start=acc; acc+=p;
+    stops.push(colors[i%colors.length]+' '+start+'% '+acc+'%');
+  });
+  if(acc<100) stops.push('#edf2f7 '+acc+'% 100%');
+  const legend=xs.map((x,i)=>'<div class="donut-legend-row"><span class="donut-swatch" style="background:'+colors[i%colors.length]+'"></span><span class="grow">'+esc(x.name==='4+'?'4+ 次':x.name+' 次')+'</span><b>'+fmtNumber(x.share,0)+'%</b></div>').join('');
+  $('attemptsChart').innerHTML='<div class="donut-wrap"><div class="donut" style="background:conic-gradient('+stops.join(',')+')"><div class="donut-center"><b>'+esc(total)+'</b><span class="muted small">总请求</span></div></div><div class="donut-legend">'+legend+'</div></div>';
+}
+
 function reasonLabel(r){return({no_matching_rule:'Policy 已配置，但 model 未命中任何 Rule，交给 CPA 默认路由',rule_cpa_default:'命中 Rule 明确配置为 CPA 默认路由',no_enabled_candidates:'命中 Rule，但没有启用候选',candidates_exhausted:'候选全部尝试后仍失败',policy_fallback_to_cpa:'Failover 规则转入 CPA 默认路由',policy_disabled:'该 API Key 的 KCR Policy 已停用',policy_lookup_miss:'检测到 Policy 查找异常',unsupported_client_affinity:'Client Affinity 模式不受支持，已 fail closed'})[r]||r||'';}
 function statusLabel(a){if(a.status)return'HTTP '+a.status;if(a.error)return'ERROR';return'-';}
-function renderAttempt(e,a,i){const reasons=e.selection_reasons||[];const reason=reasons[i]||(i===0?'按当前策略排序后选择此候选':'按 Failover 策略选择后续候选');const detail=[a.provider,a.auth_index?'AuthIndex '+a.auth_index:'',a.model?'model '+a.model:'',Number.isFinite(Number(a.duration_ms))?a.duration_ms+' ms':''].filter(Boolean).join(' · ');return '<div class="attempt"><div class="row"><b>#'+(i+1)+' '+esc(a.candidate||'-')+'</b><span class="tag">'+esc(statusLabel(a))+'</span><span class="muted small">'+esc(detail)+'</span></div><div class="reason"><b>选择原因：</b>'+esc(reason)+'</div>'+(a.error?'<div class="red small" style="margin-top:4px">'+esc(a.error)+'</div>':'')+'</div>';}
+function candidateAliasForAttempt(a){
+  const r=(SNAP.resources||[]).find((x)=>String(x.provider||'').toLowerCase()===String(a.provider||'').toLowerCase()&&String(x.auth_index||'')===String(a.auth_index||''));
+  return r?resourceLabel(r):(a.candidate||'-');
+}
+function renderAttempt(e,a,i){const reasons=e.selection_reasons||[];const reason=reasons[i]||(i===0?'按当前策略排序后选择此候选':'按 Failover 策略选择后续候选');const detail=[a.provider,a.auth_index?'AuthIndex '+a.auth_index:'',a.model?'model '+a.model:'',Number.isFinite(Number(a.duration_ms))?a.duration_ms+' ms':''].filter(Boolean).join(' · ');return '<div class="attempt"><div class="row"><b>#'+(i+1)+' '+esc(candidateAliasForAttempt(a))+'</b><span class="tag">'+esc(statusLabel(a))+'</span><span class="muted small">'+esc(detail)+'</span></div><div class="reason"><b>选择原因：</b>'+esc(reason)+'</div>'+(a.error?'<div class="red small" style="margin-top:4px">'+esc(a.error)+'</div>':'')+'</div>';}
 function fmtEventTime(at){if(!at)return'-';const d=new Date(String(at));if(Number.isNaN(d.getTime()))return String(at);const p=(n)=>String(n).padStart(2,'0');return p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds());}
-function eventState(e){if(e.success===false)return{cls:'event-state-error',label:'失败'};if(e.decision==='KCR_FALLBACK_TO_CPA')return{cls:'event-state-fallback',label:'Fallback'};if(e.decision==='KCR_BYPASS_CPA_DEFAULT')return{cls:'event-state-bypass',label:'Bypass'};return{cls:'event-state-ok',label:'成功'};}
+function eventOutcome(e){if(e.success===false)return'failed';if((e.attempts||[]).length>1||e.decision==='KCR_FALLBACK_TO_CPA')return'fallback';return'direct';}
+function eventState(e){const o=eventOutcome(e);if(o==='failed')return{cls:'event-state-error',label:'失败'};if(o==='fallback')return{cls:'event-state-fallback',label:'Fallback'};return{cls:'event-state-ok',label:'成功'};}
 function eventStatusText(e){if(e.status)return String(e.status);if(e.success===false)return'ERR';return'-';}
+function eventRoutePath(e){
+  const xs=(e.attempts||[]).map(candidateAliasForAttempt).filter(Boolean);
+  if(!xs.length)return e.final||'-';
+  return xs.filter((x,i)=>i===0||x!==xs[i-1]).join(' → ');
+}
 function toggleEvent(traceID){if(!traceID)return;if(EVENT_EXPANDED.has(traceID))EVENT_EXPANDED.delete(traceID);else EVENT_EXPANDED.add(traceID);renderEvents();}
-function renderEventDetail(e){const eventReason=reasonLabel(e.reason);const final=e.final||(e.decision==='KCR_FALLBACK_TO_CPA'?'CPA Default':'-');const primary=['时间 '+fmtEventTime(e.at),'Model '+(e.model||'-'),'Policy '+(e.policy_name||'-'),'Rule '+(e.rule_name||'-'),'Strategy '+(e.strategy||'-'),'最终候选 '+final,'Provider '+(e.provider||'-'),'状态 '+eventStatusText(e),'耗时 '+(e.duration_ms||0)+' ms','Attempts '+((e.attempts||[]).length)].join(' · ');return '<div class="event-detail"><div class="small">'+esc(primary)+'</div>'+(eventReason?'<div style="margin-top:7px"><b>路由结果：</b>'+esc(eventReason)+'</div>':'')+'<div class="muted small" style="margin-top:6px">'+esc(e.trace_id?'Trace '+e.trace_id:'')+'</div><div style="font-weight:800;margin-top:12px">候选尝试</div><div class="attempts">'+((e.attempts||[]).length?(e.attempts||[]).map((a,i)=>renderAttempt(e,a,i)).join(''):'<div class="muted small">没有候选尝试记录</div>')+'</div></div>';}
-function renderEvents(){if(!EVENT_DATA)return;const xs=EVENT_DATA.events||[];const source=EVENT_DATA.source==='sqlite'?'SQLite':'Memory';$('eventResultMeta').textContent='数据源 '+source+' · 匹配 '+(EVENT_DATA.matched||0)+' 条 · 返回 '+(EVENT_DATA.returned||0)+' 条';if(!xs.length){$('events').innerHTML='<div class="empty" style="margin-top:14px">当前条件下暂无路由记录</div>';return;}const rows=xs.map((e)=>{const key=e.trace_id||e.at,expanded=EVENT_EXPANDED.has(key),state=eventState(e),attempts=(e.attempts||[]).length,final=e.final||(e.decision==='KCR_FALLBACK_TO_CPA'?'CPA Default':'-');const row='<tr class="event-row '+(expanded?'expanded':'')+'" onclick="toggleEvent(\''+esc(key)+'\')"><td class="event-toggle"><span class="chevron">'+(expanded?'▾':'›')+'</span></td><td class="event-time mono">'+esc(fmtEventTime(e.at))+'</td><td><div class="event-primary ellipsis">'+esc(e.model||'-')+'</div></td><td><div class="event-primary">'+esc(e.policy_name||'-')+'</div><div class="muted small ellipsis">'+esc(e.rule_name||'-')+'</div></td><td><span class="strategy-chip">'+esc(e.strategy||'-')+'</span></td><td><div class="event-primary ellipsis">'+esc(final)+'</div></td><td>'+esc(e.provider||'-')+'</td><td><span class="event-state '+state.cls+'"><i></i>'+esc(state.label)+'</span> <span class="http-code">'+esc(eventStatusText(e))+'</span></td><td>'+(e.duration_ms||0)+' ms</td><td><span class="attempt-count '+(attempts>1?'multi':'')+'">'+attempts+'</span></td></tr>';return row+(expanded?'<tr class="event-detail-row"><td colspan="10">'+renderEventDetail(e)+'</td></tr>':'');}).join('');$('events').innerHTML='<div class="event-table-wrap"><table class="event-table"><thead><tr><th></th><th>时间（本地）</th><th>Model</th><th>Policy / Rule</th><th>Strategy</th><th>最终候选</th><th>Provider</th><th>状态</th><th>耗时</th><th>Attempts</th></tr></thead><tbody>'+rows+'</tbody></table></div>';}
+function renderEventDetail(e){const eventReason=reasonLabel(e.reason);const primary=['时间 '+fmtEventTime(e.at),'Model '+(e.model||'-'),'Policy '+(e.policy_name||'-'),'Rule '+(e.rule_name||'-'),'Strategy '+(e.strategy||'-'),'路由路径 '+eventRoutePath(e),'状态 '+eventStatusText(e),'耗时 '+(e.duration_ms||0)+' ms','Attempts '+((e.attempts||[]).length)].join(' · ');return '<div class="event-detail"><div class="small">'+esc(primary)+'</div>'+(eventReason?'<div style="margin-top:7px"><b>路由结果：</b>'+esc(eventReason)+'</div>':'')+'<div class="muted small" style="margin-top:6px">'+esc(e.trace_id?'Trace '+e.trace_id:'')+'</div><div style="font-weight:800;margin-top:12px">候选尝试</div><div class="attempts">'+((e.attempts||[]).length?(e.attempts||[]).map((a,i)=>renderAttempt(e,a,i)).join(''):'<div class="muted small">没有候选尝试记录</div>')+'</div></div>';}
+
+function renderEvents(){
+  if(!EVENT_DATA)return;
+  const xs=EVENT_DATA.events||[], source=EVENT_DATA.source==='sqlite'?'SQLite':'Memory';
+  $('eventResultMeta').textContent='数据源 '+source+' · 共 '+(EVENT_DATA.matched||0)+' 条';
+  if(!xs.length){$('events').innerHTML='<div class="empty">当前条件下暂无路由记录</div>';return;}
+  const rows=xs.map((e)=>{
+    const key=e.trace_id||e.at, expanded=EVENT_EXPANDED.has(key), state=eventState(e), attempts=(e.attempts||[]).length, path=eventRoutePath(e);
+    const row='<tr class="event-row '+(expanded?'expanded':'')+'" onclick="toggleEvent(\''+esc(key)+'\')"><td class="event-toggle"><span class="chevron">'+(expanded?'▾':'›')+'</span></td><td class="event-time mono">'+esc(fmtEventTime(e.at))+'</td><td><div class="event-primary ellipsis">'+esc(e.model||'-')+'</div></td><td><div class="event-primary">'+esc(e.policy_name||'-')+'</div></td><td class="route-path-cell"><div class="ellipsis" title="'+esc(path)+'">'+esc(path)+'</div></td><td><span class="event-state '+state.cls+'"><i></i>'+esc(state.label)+'</span></td><td><span class="attempt-count '+(attempts>1?'multi':'')+'">'+attempts+'</span></td><td>'+esc(e.duration_ms||0)+' ms</td></tr>';
+    return row+(expanded?'<tr class="event-detail-row"><td colspan="8">'+renderEventDetail(e)+'</td></tr>':'');
+  }).join('');
+  $('events').innerHTML='<div class="event-table-wrap"><table class="event-table route-record-table"><thead><tr><th></th><th>时间</th><th>Model</th><th>Policy</th><th>路由路径</th><th>结果</th><th>Attempts</th><th>耗时</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
+}
+
+function renderEventPager(){
+  const total=Number(EVENT_DATA?.matched||0);
+  const pages=Math.max(1,Math.ceil(total/ROUTE_PAGE_SIZE));
+  if(ROUTE_PAGE>pages)ROUTE_PAGE=pages;
+  const items=[];
+  const add=(p)=>{if(p>=1&&p<=pages&&!items.includes(p))items.push(p);};
+  add(1); for(let p=ROUTE_PAGE-2;p<=ROUTE_PAGE+2;p++)add(p); add(pages); items.sort((a,b)=>a-b);
+  let last=0, html='<button '+(ROUTE_PAGE<=1?'disabled':'')+' onclick="goRoutePage('+(ROUTE_PAGE-1)+')">‹</button>';
+  for(const p of items){if(last&&p-last>1)html+='<span class="muted">…</span>';html+='<button class="'+(p===ROUTE_PAGE?'active':'')+'" onclick="goRoutePage('+p+')">'+p+'</button>';last=p;}
+  html+='<button '+(ROUTE_PAGE>=pages?'disabled':'')+' onclick="goRoutePage('+(ROUTE_PAGE+1)+')">›</button><span class="muted small">'+ROUTE_PAGE_SIZE+' 条/页</span>';
+  $('eventPager').innerHTML=html;
+}
+async function goRoutePage(page){ROUTE_PAGE=Math.max(1,page);await loadEvents(false);}
 
 load().catch((e)=>{
   const target=$('dashboardPage')||document.body;
