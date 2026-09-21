@@ -1,5 +1,39 @@
 # Changelog
 
+## v0.8.3 - 2026-09-21
+
+重构仪表盘与路由统计，使 KCR 的可观测界面聚焦“当前路由是否健康、请求最终怎么走”，避免向通用 Usage/Cost 平台膨胀。
+
+### 仪表盘
+
+- 仪表盘改为单一页面级时间范围 + 刷新入口。
+- 顶部状态卡聚焦 Policy、上游资源、异常资源与 Fallback。
+- 新增直接成功 / Fallback / 失败路由趋势图。
+- 新增当前异常摘要，集中展示不可用资源、OPEN / HALF_OPEN、发生 Fallback 的 Policy 与下一次 Probe。
+- Policy 状态表直接展示当前候选路由链，并结合候选健康状态标记异常节点。
+- 上游资源健康表突出 OPEN / HALF_OPEN、连续失败与 Backoff / Next Probe。
+- 最近事件只保留失败、Fallback 等需要关注的路由异常。
+- 移除顶部多余的 admin / 用户区域。
+
+### 路由统计
+
+- “使用统计”更名为“路由统计”。
+- 筛选项收敛为时间范围、Policy、Provider、Model，并保留单一刷新入口。
+- 顶部指标收敛为总请求、直接成功、Fallback、失败。
+- 新增最终候选 / Fallback 命中分布。
+- 新增 Top Fallback 路径、失败原因分布与 Attempts 分布。
+- 路由记录主表改为“路由路径优先”，点击后仍可查看完整候选尝试与失败原因。
+- 路由记录支持真正的 offset 分页。
+
+### 后端统计
+
+- 新增完整时间窗口路由聚合 API，图表不再依赖当前可见的记录页。
+- SQLite 与 Memory 两种 observability 数据源均支持路由统计。
+- 新增 route-only 事件过滤，统计与列表只聚焦 KCR 实际接管 / Fallback 的请求。
+- 新增路由聚合、Fallback 路径、失败原因与分页回归测试。
+
+关联：Issue #37、PR #38。
+
 ## v0.8.2 - 2026-09-21
 
 修复 v0.8.1 的资源别名与 Policy 编辑器遗留问题，并处理 PR #34 的全部 review findings。
