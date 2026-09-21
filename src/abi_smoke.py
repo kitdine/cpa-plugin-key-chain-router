@@ -120,7 +120,7 @@ def host_call(ctx, method, req, n, out):
         captured_forced_provider=payload.get('forced_provider')
         if captured_ticket and unclaimed_host_error_once:
             unclaimed_host_error_once=False
-            return_bytes(out, json.dumps({'ok':False,'error':{'code':'upstream_failure','message':'simulated upstream 503'}}).encode()); return 1
+            return_bytes(out, json.dumps({'ok':False,'error':{'code':'host_call_failed','message':'no auth available','http_status':503}}).encode()); return 1
         if captured_ticket and skip_scheduler_claim_once:
             skip_scheduler_claim_once=False
         elif captured_ticket:
@@ -227,7 +227,7 @@ with tempfile.TemporaryDirectory() as td:
     try:
         pcall('executor.execute',{'Model':'gpt-anything','SourceFormat':'openai-response','Headers':{'Authorization':['Bearer '+key]},'OriginalRequest':base64.b64encode(b'{"model":"gpt-anything","input":"unclaimed-error"}').decode(),'Payload':base64.b64encode(b'{"model":"gpt-anything","input":"unclaimed-error"}').decode(),'Query':{},'Metadata':{},'host_callback_id':'cb-unclaimed-error'})
     except RuntimeError as exc:
-        assert 'simulated upstream 503' in str(exc), exc
+        assert 'host_call_failed: no auth available' in str(exc), exc
         assert 'scheduler did not claim execution ticket' not in str(exc), exc
     else:
         raise AssertionError('native exact-pin rejection must remain an actionable host error')
@@ -243,7 +243,8 @@ with tempfile.TemporaryDirectory() as td:
     assert snapbody['recent_events'], 'no routing event recorded'
     ev=snapbody['recent_events'][0]
     assert ev['decision']=='KCR_HANDLED' and ev['success'] is False, ev
-    assert 'simulated upstream 503' in ev.get('error',''), ev
+    assert 'host_call_failed: no auth available' in ev.get('error',''), ev
+    assert ev['attempts'] and ev['attempts'][0]['status']==503, ev
     assert ev['attempts'][0]['model']=='gpt-anything'
     health=snapbody.get('candidate_health') or []
     assert health and health[0]['state']=='closed', health
