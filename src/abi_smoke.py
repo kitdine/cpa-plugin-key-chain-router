@@ -234,6 +234,15 @@ with tempfile.TemporaryDirectory() as td:
     else:
         raise AssertionError('unclaimed post-dispatch host error must remain ownership-terminal')
 
+    emitted.clear(); output_closed=False; upread=0
+    sx=pcall('executor.execute_stream',{'Model':'gpt-anything','SourceFormat':'openai-response','Headers':{'Authorization':['Bearer '+key]},'OriginalRequest':base64.b64encode(b'{"model":"gpt-anything","input":"hi","stream":true}').decode(),'Payload':base64.b64encode(b'{"model":"gpt-anything","input":"hi","stream":true}').decode(),'Query':{},'Metadata':{},'stream_id':'plugin-out-1','host_callback_id':'cb-stream'})
+    deadline=time.time()+2
+    while not output_closed and time.time()<deadline: time.sleep(0.01)
+    assert output_closed, 'plugin output stream was not closed'
+    assert captured_auth_id==LIVE_API_ID, captured_auth_id
+    assert captured_forced_provider=='codex', captured_forced_provider
+    assert emitted and b'data:' in emitted[0], emitted
+
     # With native request-scoped auth_id pinning, an error returned before
     # scheduler.pick can be the exact credential being rejected by CPA itself
     # (removed/disabled/unavailable/model-ineligible). Preserve that host error
@@ -263,15 +272,6 @@ with tempfile.TemporaryDirectory() as td:
     assert ev['attempts'] and ev['attempts'][0]['status']==503, ev
     assert ev['attempts'][0]['model']=='gpt-anything'
     assert any(x.get('message')=='kcr routing decision' for x in logs), logs
-
-    emitted.clear(); output_closed=False; upread=0
-    sx=pcall('executor.execute_stream',{'Model':'gpt-anything','SourceFormat':'openai-response','Headers':{'Authorization':['Bearer '+key]},'OriginalRequest':base64.b64encode(b'{"model":"gpt-anything","input":"hi","stream":true}').decode(),'Payload':base64.b64encode(b'{"model":"gpt-anything","input":"hi","stream":true}').decode(),'Query':{},'Metadata':{},'stream_id':'plugin-out-1','host_callback_id':'cb-stream'})
-    deadline=time.time()+2
-    while not output_closed and time.time()<deadline: time.sleep(0.01)
-    assert output_closed, 'plugin output stream was not closed'
-    assert captured_auth_id==LIVE_API_ID, captured_auth_id
-    assert captured_forced_provider=='codex', captured_forced_provider
-    assert emitted and b'data:' in emitted[0], emitted
 
 plugin.shutdown()
 print('ABI_SMOKE_PASS')
