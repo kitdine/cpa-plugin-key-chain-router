@@ -52,7 +52,7 @@ function renderPolicies() {
     out += '<div class="policy"><div class="row"><div class="grow"><h3 style="margin:0">' +
       esc(p.name) + ' <span class="' + (p.enabled ? 'green' : 'muted') + '">' +
       (p.enabled ? '● 启用' : '● 停用') + '</span></h3><div class="muted">Key ' +
-      esc(p.key_hint) + ' · ' + p.rules.length + ' 条模型规则</div></div>' +
+      esc(p.key_hint) + ' · ' + p.rules.length + ' 条模型规则' + (p.client_affinity === 'strict' ? ' · Client Affinity: ' + esc(p.client_provider) : '') + '</div></div>' +
       '<button onclick="diagnose(\'' + esc(p.key_fingerprint) + '\')">测试策略</button>' +
       '<button onclick="openPolicy(\'' + esc(p.key_fingerprint) + '\')">编辑</button>' +
       '<button onclick="delPolicy(\'' + esc(p.key_fingerprint) + '\')">删除</button></div>';
