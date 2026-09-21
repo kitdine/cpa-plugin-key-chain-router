@@ -239,6 +239,7 @@ type apiResource struct {
 	Kind           string   `json:"kind"`
 	Provider       string   `json:"provider"`
 	DisplayName    string   `json:"display_name"`
+	Alias          string   `json:"alias,omitempty"`
 	AuthID         string   `json:"auth_id,omitempty"`
 	AuthIndex      string   `json:"auth_index,omitempty"`
 	Prefix         string   `json:"prefix,omitempty"`
@@ -253,6 +254,7 @@ type apiResource struct {
 type downstreamKey struct {
 	Fingerprint string `json:"fingerprint"`
 	Hint        string `json:"hint"`
+	Alias       string `json:"alias,omitempty"`
 }
 
 type hostAuthListResponse struct {
