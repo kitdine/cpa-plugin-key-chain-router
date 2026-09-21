@@ -87,7 +87,13 @@ function openPolicy(fp) {
   $('pEnabled').value = String(EDIT.enabled !== false);
   EDIT.client_affinity = EDIT.client_affinity || 'off';
   EDIT.client_provider = EDIT.client_provider || '';
-  $('pAffinity').value = EDIT.client_affinity;
+  const affinitySupported = EDIT.client_affinity === 'off' || EDIT.client_affinity === 'strict';
+  if (!affinitySupported) {
+    $('pAffinity').innerHTML = '<option value="' + esc(EDIT.client_affinity) + '" selected disabled>' + esc(EDIT.client_affinity) + '（当前版本不支持）</option><option value="off">关闭</option><option value="strict">Strict</option>';
+  } else {
+    $('pAffinity').innerHTML = '<option value="off">关闭</option><option value="strict">Strict</option>';
+    $('pAffinity').value = EDIT.client_affinity;
+  }
   renderClientProviders();
   const keys = availableKeys(fp);
   $('pKey').innerHTML = keys.map((k) => '<option value="' + esc(k.fingerprint) + '" data-hint="' +
@@ -126,10 +132,15 @@ function resourceAllowedByAffinity(r) {
 
 function renderAffinityState() {
   const strict = EDIT && EDIT.client_affinity === 'strict';
+  const supported = EDIT && (EDIT.client_affinity === 'off' || strict);
   $('pClientProviderWrap').style.display = strict ? 'block' : 'none';
-  $('affinityNote').innerHTML = strict
-    ? 'Strict 已开启：<b>' + esc(EDIT.client_provider || '-') + '</b> 原生 API 资源可选；OAuth 不受 Provider 限制。Mixed / 多套规则仅预留，本期不实现。'
-    : 'Client Affinity 已关闭：候选资源不按客户端 Provider 过滤。';
+  if (!supported) {
+    $('affinityNote').innerHTML = '<span class="red"><b>当前 Policy 使用此版本不支持的 Client Affinity：' + esc(EDIT.client_affinity) + '。</b>运行时将 fail closed；如需保存修改，请明确选择“关闭”或“Strict”。</span>';
+  } else {
+    $('affinityNote').innerHTML = strict
+      ? 'Strict 已开启：<b>' + esc(EDIT.client_provider || '-') + '</b> 原生 API 资源可选；OAuth 不受 Provider 限制。Mixed / 多套规则仅预留，本期不实现。'
+      : 'Client Affinity 已关闭：候选资源不按客户端 Provider 过滤。';
+  }
 }
 
 function changeAffinity() {
