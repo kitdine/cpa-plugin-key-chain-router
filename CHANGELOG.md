@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.7.1 - 2026-09-21
 
 恢复基于 CPA 原生 request-scoped exact AuthID 的 credential 执行，不再依赖 prefix / 同一 CPA credential priority 才能完成 ordered failover。
 
@@ -12,6 +12,9 @@
 - 无效、disabled、不可用或 model-ineligible credential 继续 fail closed，不允许 CPA 静默换绑其它 credential。
 - ABI smoke 同时验证 non-stream / stream host callback 都携带 exact `auth_id` 与 `forced_provider`。
 - 推荐 CLIProxyAPI v7.3.10+；旧 CPA 仍保留 ticket/prefix 兼容路径，但可能受旧 priority pre-filter 限制。
+- CPA 在 `scheduler.pick` 前因 exact pin 不可执行而返回的明确选择失败会保留原始错误与 HTTP status，使 FailoverPolicy 可以继续下一个候选。
+- 其它未 claim 的 host success/error 继续按 scheduler ownership failure 终止，避免旧 CPA 或其它 scheduler 已发送请求后产生重复计费/副作用。
+- credential identity / exact Auth.ID 解析失败改为 typed routing-control failure，不再错误污染 candidate circuit health。
 
 关联：#21、#25、#28；CPA upstream #5814、#5815。
 
