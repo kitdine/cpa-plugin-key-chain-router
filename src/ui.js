@@ -102,7 +102,12 @@ function closePolicy() { $('policyModal').classList.remove('open'); }
 
 function clientProviderOptions() {
   const seen = new Set();
-  return (SNAP.resources || []).filter((r) => String(r.kind || '').toLowerCase() !== 'oauth').map((r) => String(r.provider || '').trim()).filter((p) => p && !seen.has(p.toLowerCase()) && seen.add(p.toLowerCase())).sort();
+  return (SNAP.resources || []).map((r) => String(r.provider || '').trim()).filter((p) => {
+    const k = p.toLowerCase();
+    if (!p || seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  }).sort();
 }
 
 function renderClientProviders() {
@@ -117,16 +122,6 @@ function resourceAllowedByAffinity(r) {
   return String(r.provider || '').toLowerCase() === String(EDIT.client_provider || '').toLowerCase();
 }
 
-function pruneAffinityCandidates() {
-  if (!EDIT || EDIT.client_affinity !== 'strict') return;
-  for (const rule of EDIT.rules || []) {
-    rule.candidates = (rule.candidates || []).filter((c) => {
-      const r = (SNAP.resources || []).find((x) => x.id === c.resource_id);
-      return r ? resourceAllowedByAffinity(r) : false;
-    });
-  }
-}
-
 function renderAffinityState() {
   const strict = EDIT && EDIT.client_affinity === 'strict';
   $('pClientProviderWrap').style.display = strict ? 'block' : 'none';
@@ -139,14 +134,12 @@ function changeAffinity() {
   EDIT.client_affinity = $('pAffinity').value;
   if (EDIT.client_affinity !== 'strict') EDIT.client_provider = '';
   else renderClientProviders();
-  pruneAffinityCandidates();
   renderAffinityState();
   renderRules();
 }
 
 function changeClientProvider() {
   EDIT.client_provider = $('pClientProvider').value;
-  pruneAffinityCandidates();
   renderAffinityState();
   renderRules();
 }
@@ -234,8 +227,12 @@ function renderCands(r, ri) {
   const f = strategyFields(r.strategy);
   const cols = f.priority && f.weight ? '1.5fr 1.1fr 90px 90px 1.2fr 105px' :
     f.weight ? '1.5fr 1.1fr 90px 1.2fr 105px' : '1.5fr 1.1fr 1.2fr 105px';
-  return (r.candidates || []).map((c, ci) => '<div class="candidate" style="grid-template-columns:' + cols + '">' +
-    '<div><label>上游资源</label><select onchange="pickRes(' + ri + ',' + ci + ',this.value)">' + resOptions(c.resource_id) + '</select></div>' +
+  return (r.candidates || []).map((c, ci) => {
+    const resource = (SNAP.resources || []).find((x) => x.id === c.resource_id);
+    const allowed = !resource || resourceAllowedByAffinity(resource);
+    const options = allowed ? resOptions(c.resource_id) : '<option value="' + esc(c.resource_id || '') + '" selected>' + esc(c.name || c.provider || '当前候选') + ' · 当前 Affinity 不允许</option>' + resOptions('');
+    return '<div class="candidate" style="grid-template-columns:' + cols + ';' + (allowed ? '' : 'opacity:.65') + '">' +
+    '<div><label>上游资源</label><select onchange="pickRes(' + ri + ',' + ci + ',this.value)">' + options + '</select>' + (allowed ? '' : '<div class="warn small">保存 Strict Policy 前请更换或删除此候选</div>') + '</div>' +
     '<div><label>显示名称</label><input value="' + esc(c.name || '') + '" oninput="EDIT.rules[' + ri + '].candidates[' + ci + '].name=this.value"></div>' +
     (f.priority ? '<div><label>Priority</label><input type="number" value="' + (c.priority || 100) + '" oninput="EDIT.rules[' + ri + '].candidates[' + ci + '].priority=+this.value||100"></div>' : '') +
     (f.weight ? '<div><label>Weight</label><input type="number" min="1" value="' + (c.weight || 1) + '" oninput="EDIT.rules[' + ri + '].candidates[' + ci + '].weight=+this.value||1"></div>' : '') +
@@ -244,7 +241,8 @@ function renderCands(r, ri) {
     '<option value="true" ' + (c.enabled !== false ? 'selected' : '') + '>启用</option><option value="false" ' +
     (c.enabled === false ? 'selected' : '') + '>停用</option></select><div class="row" style="gap:4px;margin-top:5px">' +
     '<button onclick="moveCand(' + ri + ',' + ci + ',-1)">↑</button><button onclick="moveCand(' + ri + ',' + ci + ',1)">↓</button>' +
-    '<button onclick="EDIT.rules[' + ri + '].candidates.splice(' + ci + ',1);renderRules()">×</button></div></div></div>').join('');
+    '<button onclick="EDIT.rules[' + ri + '].candidates.splice(' + ci + ',1);renderRules()">×</button></div></div></div>';
+  }).join('');
 }
 
 function fromRes(r) {
