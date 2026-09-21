@@ -99,7 +99,7 @@ func executeCandidateV4(c *PolicyCandidate, source, clientModel string, body []b
 	claimed := finishExecutionTicket(ticket)
 	ar := attemptResult{Candidate: c.Name, Provider: c.Provider, AuthIndex: c.AuthIndex, Model: model, Duration: time.Since(started)}
 	ar.DurationMs = ar.Duration.Milliseconds()
-	if ticket != "" && !claimed {
+	if ticket != "" && !claimed && err == nil {
 		if stream && len(raw) > 0 {
 			var leaked hostModelStreamResponse
 			if json.Unmarshal(raw, &leaked) == nil && leaked.StreamID != "" { _ = closeHostStream(leaked.StreamID) }
