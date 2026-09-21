@@ -27,3 +27,16 @@ func TestClientAffinityOffDoesNotFilter(t *testing.T) {
 		t.Fatalf("len=%d", len(got))
 	}
 }
+
+func TestClientAffinityUnknownModeFailsClosed(t *testing.T) {
+	p := &Policy{ClientAffinity: "mixed", ClientProvider: "claude"}
+	xs := []*PolicyCandidate{{ResourceKind: "API", Provider: "claude"}, {ResourceKind: "OAuth", Provider: "codex"}}
+	if got := filterCandidatesByClientAffinityV1(p, xs); len(got) != 0 {
+		t.Fatalf("unknown affinity must fail closed, got %d candidates", len(got))
+	}
+	for _, candidate := range xs {
+		if candidateAllowedByClientAffinityV1(p, candidate) {
+			t.Fatalf("unknown affinity unexpectedly allowed candidate %+v", candidate)
+		}
+	}
+}
