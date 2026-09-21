@@ -25,8 +25,11 @@ func candidateAllowedByClientAffinityV1(p *Policy, c *PolicyCandidate) bool {
 	if p == nil || c == nil {
 		return false
 	}
-	if p.ClientAffinity != clientAffinityStrict {
+	if p.ClientAffinity == clientAffinityOff {
 		return true
+	}
+	if p.ClientAffinity != clientAffinityStrict {
+		return false
 	}
 	if strings.EqualFold(strings.TrimSpace(c.ResourceKind), "OAuth") {
 		return true
@@ -35,8 +38,14 @@ func candidateAllowedByClientAffinityV1(p *Policy, c *PolicyCandidate) bool {
 }
 
 func filterCandidatesByClientAffinityV1(p *Policy, xs []*PolicyCandidate) []*PolicyCandidate {
-	if p == nil || p.ClientAffinity != clientAffinityStrict {
+	if p == nil {
+		return nil
+	}
+	if p.ClientAffinity == clientAffinityOff {
 		return xs
+	}
+	if p.ClientAffinity != clientAffinityStrict {
+		return nil
 	}
 	out := make([]*PolicyCandidate, 0, len(xs))
 	for _, c := range xs {
