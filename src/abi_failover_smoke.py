@@ -145,7 +145,7 @@ def host_call(ctx, method, req, n, out):
         sid = payload["stream_id"]
         reads[sid] += 1
         if reads[sid] == 1:
-            write_buffer(out, envelope({"payload": base64.b64encode(b'data: {"ok":true}\\n\\n').decode(), "done": False}))
+            write_buffer(out, envelope({"payload": base64.b64encode(b'data: {"ok":true}\n\n').decode(), "done": False}))
         else:
             write_buffer(out, envelope({"done": True}))
         return 0
@@ -197,7 +197,7 @@ with tempfile.TemporaryDirectory() as directory:
     state_file = os.path.join(directory, "state.json")
     cpa_file = os.path.join(directory, "config.yaml")
     with open(cpa_file, "w", encoding="utf-8") as f:
-        f.write("api-keys:\\n  - " + KEY + "\\n")
+        f.write("api-keys:\n  - " + KEY + "\n")
     state = {"version": 4, "policies": {
         FINGERPRINT: {
             "name": "A to B failover", "key_fingerprint": FINGERPRINT,
@@ -209,7 +209,7 @@ with tempfile.TemporaryDirectory() as directory:
                          "log_enabled": False, "sqlite_enabled": False}}
     with open(state_file, "w", encoding="utf-8") as f:
         json.dump(state, f)
-    config_yaml = f"enabled: true\\nstate_file: {state_file}\\ncpa_config_file: {cpa_file}\\n"
+    config_yaml = f"enabled: true\nstate_file: {state_file}\ncpa_config_file: {cpa_file}\n"
     invoke("plugin.register", {"config_yaml": base64.b64encode(config_yaml.encode()).decode(),
                                "schema_version": 5})
 
