@@ -55,7 +55,9 @@ jobs:
         working-directory: src
         env:
           VERSION: ${{ steps.version.outputs.version }}
-        run: python3 abi_smoke.py "../dist/key-chain-router-v${VERSION}.so"
+        run: |
+          python3 abi_smoke.py "../dist/key-chain-router-v${VERSION}.so"
+          python3 abi_failover_smoke.py "../dist/key-chain-router-v${VERSION}.so"
 
       - name: Prepare release files
         shell: bash

@@ -135,16 +135,47 @@ func (e *hostCallbackError) StatusCode() int {
 
 func isNativeExactPinSelectionError(err error) bool {
 	var hostErr *hostCallbackError
-	if !errors.As(err, &hostErr) || hostErr == nil {
+	if !errors.As(err, &hostErr) || hostErr == nil || hostErr.Code != "host_call_failed" {
 		return false
 	}
-	// Current CPA turns auth-manager selection failures that happen before any
-	// provider dispatch into this exact host callback envelope. Keep this narrow:
-	// any other unclaimed host error remains an ownership failure to avoid
-	// retrying a request that may already have reached an upstream.
-	return hostErr.Code == "host_call_failed" &&
-		hostErr.HTTPStatus == http.StatusServiceUnavailable &&
-		strings.TrimSpace(hostErr.Message) == "no auth available"
+	// An exact AuthID can be rejected by CPA's credential selector *before*
+	// scheduler.pick claims the ticket (for example, after the credential enters
+	// quota cooldown). Those rejections must reach KCR's FailoverPolicy so the
+	// next configured provider can run. Do not allow generic unclaimed 429/5xx
+	// errors: the request may already have reached an upstream under another
+	// scheduler, making an automatic replay unsafe.
+	msg := strings.TrimSpace(hostErr.Message)
+	if hostErr.HTTPStatus == http.StatusTooManyRequests {
+		// CPA's modelCooldownError is a structured JSON error, not a generic
+		// upstream HTTP 429. Match only its exact error code.
+		var payload struct {
+			Error struct {
+				Code string `json:"code"`
+			} `json:"error"`
+		}
+		return json.Unmarshal([]byte(msg), &payload) == nil && payload.Error.Code == "model_cooldown"
+	}
+	if hostErr.HTTPStatus != 0 && hostErr.HTTPStatus != http.StatusServiceUnavailable {
+		return false
+	}
+	if hostErr.HTTPStatus == http.StatusServiceUnavailable && msg == "no auth available" {
+		// Legacy CPA selection envelope (before contextual error enrichment).
+		return true
+	}
+	// Current CPA enriches selector errors with provider/model context and
+	// sometimes the *previous* upstream error. The code/message prefix remains
+	// the trusted signal that this attempt did not select a credential.
+	for _, prefix := range []string{
+		"auth_not_found: no auth available",
+		"auth_not_found: no auth candidates",
+		"auth_unavailable: no auth available",
+		"provider_not_found: no provider supplied",
+	} {
+		if msg == prefix || strings.HasPrefix(msg, prefix+" (") {
+			return true
+		}
+	}
+	return false
 }
 
 type lifecycleRequest struct {

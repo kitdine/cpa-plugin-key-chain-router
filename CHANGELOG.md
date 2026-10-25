@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.8.4 - 2026-10-25
+
+修复单个上游凭据 / Provider 额度耗尽后，KCR 不会继续尝试下一候选的问题。
+
+### A → B 配额耗尽故障切换
+
+- 当前 CPA 会在实际执行凭据前返回 `model_cooldown`（429）、带有 Provider/Model 上下文的 `auth_unavailable` / `auth_not_found`（503），或 `provider_not_found`。旧 KCR 仅放行无上下文的精确 `503 no auth available`，其它错误被覆盖为 scheduler ticket 未领取，从而直接中止整条链。
+- 对 CPA 明确的执行前选取失败保留真实 HTTP 状态，交由现有 Rule FailoverPolicy 继续下一个配置的候选。支持流式与非流式执行。
+- 保留 fail-closed 安全边界：未领取 scheduler ticket 的任意上游 429/5xx、一般错误及成功回包仍禁止重试，避免不确定的重复执行、重复计费。
+- 新增 Go 错误分类测试与独立 ABI A（Codex）→ B（Gemini）测试，包含配额冷却、无可用 Provider、正常 429、流式切换和错误场景下的防重放验证。
+- 兼容原有 CPA legacy 选择错误与 v0.8.3 状态，不修改现有 Policy 或凭据配置。
+
+关联：PR #39。
+
 ## v0.8.3 - 2026-09-21
 
 重构仪表盘与路由统计，使 KCR 的可观测界面聚焦“当前路由是否健康、请求最终怎么走”，避免向通用 Usage/Cost 平台膨胀。
