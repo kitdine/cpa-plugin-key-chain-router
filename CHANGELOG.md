@@ -12,7 +12,7 @@
 - 新增 Go 错误分类测试与独立 ABI A（Codex）→ B（Gemini）测试，包含配额冷却、无可用 Provider、正常 429、流式切换和错误场景下的防重放验证。
 - 兼容原有 CPA legacy 选择错误与 v0.8.3 状态，不修改现有 Policy 或凭据配置。
 
-关联：PR #39。
+关联：PR #39；[v0.8.4 Release](https://github.com/kitdine/cpa-plugin-key-chain-router/releases/tag/v0.8.4)。
 
 ## v0.8.3 - 2026-09-21
 
