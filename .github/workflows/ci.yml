@@ -44,6 +44,7 @@ jobs:
           VERSION="$(tr -d '[:space:]' < VERSION)"
           cd src
           python3 abi_smoke.py "../dist/key-chain-router-v${VERSION}.so"
+          python3 abi_failover_smoke.py "../dist/key-chain-router-v${VERSION}.so"
 
       - name: Binary inspection
         shell: bash
