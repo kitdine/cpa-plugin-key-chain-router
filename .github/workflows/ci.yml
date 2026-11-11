@@ -35,6 +35,9 @@ jobs:
         working-directory: src
         run: node --check ui.js
 
+      - name: JavaScript UI regression tests
+        run: node --test scripts/ui.test.cjs
+
       - name: Build linux/amd64 plugin
         run: bash ./scripts/build.sh
 

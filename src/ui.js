@@ -8,7 +8,12 @@ let DASH_STATS = null;
 let DASH_EVENTS = null;
 let ROUTE_PAGE = 1;
 const ROUTE_PAGE_SIZE = 10;
-let RULE_SEARCH = {};
+let RULE_UI = new WeakMap();
+const POLICY_PENDING = new Set();
+let POLICY_STATUS = 'all';
+let RESOURCE_FILTERS = {type:'all', provider:'all', status:'all'};
+let POLICY_SAVING = false;
+let EDIT_BASELINE = '';
 let DRAG_CAND = null;
 let CURRENT_VIEW = 'dashboard';
 
@@ -29,6 +34,12 @@ function esc(s) {
 }
 
 function showView(name) {
+  if (CURRENT_VIEW === 'policyEditor' && EDIT && name !== 'policyEditor') {
+    if (POLICY_SAVING) return;
+    if (editorSignature() !== EDIT_BASELINE && !confirm('尚有未保存的修改，确定放弃吗？')) return;
+    EDIT = null;
+    RULE_UI = new WeakMap();
+  }
   CURRENT_VIEW = name;
   for (const n of ['dashboard', 'policy', 'policyEditor', 'resources', 'usage', 'settings']) {
     const page = $(n + 'Page');
@@ -269,17 +280,66 @@ function renderDashboard() {
   $('envNotice').innerHTML = SNAP.config_error ? '<div class="note">CPA 配置读取异常：'+esc(SNAP.config_error)+'</div>' : '';
 }
 
+function restoreControlFocus(id) {
+  const control = id && $(id);
+  if (control && !control.disabled) control.focus?.({preventScroll:true});
+}
+
+function filterChip(label, value, active, count, handler, id) {
+  return '<button type="button" '+(id?'id="'+esc(id)+'" ':'')+'class="filter-chip '+(active?'active':'')+'" aria-pressed="'+active+'" onclick="'+handler+'">'+esc(label)+(count===undefined?'':' <span class="chip-count">'+count+'</span>')+'</button>';
+}
+
 function renderPolicies() {
+  const focused = document.activeElement?.id;
   const ps = SNAP.policies || [];
-  if (!ps.length) {
-    $('policies').innerHTML = '<div class="empty">还没有 Policy。每个下游 API Key 最多创建一个。<div style="margin-top:12px"><button class="btn primary" onclick="openPolicy()">＋ 新建 Policy</button></div></div>';
+  const pending = POLICY_PENDING.size > 0;
+  if ($('newPolicyButton')) $('newPolicyButton').disabled = pending;
+  const q = String($('policySearch')?.value || '').trim().toLowerCase();
+  const enabled = ps.filter((p)=>p.enabled).length;
+  $('policyFilters').innerHTML = [['all','全部',ps.length],['enabled','已启用',enabled],['disabled','已停用',ps.length-enabled]].map(([v,n,c])=>filterChip(n,v,POLICY_STATUS===v,c,"POLICY_STATUS='"+v+"';renderPolicies()",'policy-filter-'+v)).join('');
+  const xs = ps.filter((p)=>(POLICY_STATUS==='all'||Boolean(p.enabled)===(POLICY_STATUS==='enabled')) && (!q || [p.name,p.key_hint,p.client_type,p.client_provider,...(p.rules||[]).flatMap((r)=>r.models||[])].some((x)=>String(x||'').toLowerCase().includes(q))));
+  $('policyCount').textContent = xs.length + ' / ' + ps.length + ' 个 Policy';
+  if (!xs.length) {
+    $('policies').innerHTML = '<div class="empty">'+(ps.length?'没有匹配的 Policy，请调整搜索或状态筛选。':'还没有 Policy。每个下游 API Key 最多创建一个。')+'</div>';
+    restoreControlFocus(focused);
     return;
   }
-  $('policies').innerHTML = ps.map((p) => {
+  $('policies').innerHTML = xs.map((p) => {
     const strict = p.client_affinity === 'strict';
     const type = p.client_type || p.client_provider || '-';
-    return '<div class="policy-row"><div class="row"><div class="grow"><h3>' + esc(p.name) + ' <span class="' + (p.enabled ? 'green' : 'muted') + '">' + (p.enabled ? '● 启用' : '● 停用') + '</span></h3><div class="policy-meta"><span>Key ' + esc(p.key_hint) + '</span><span>客户端：' + esc(clientTypeLabel(type)) + '</span><span>' + (p.rules || []).length + ' 条模型规则</span><span class="tag ' + (strict ? 'ok' : '') + '">Client Affinity ' + (strict ? 'Strict' : 'Off') + '</span></div></div><button class="btn small" onclick="diagnose(\'' + esc(p.key_fingerprint) + '\')">诊断</button><button class="btn small" onclick="openPolicy(\'' + esc(p.key_fingerprint) + '\')">编辑</button><button class="btn small danger" onclick="delPolicy(\'' + esc(p.key_fingerprint) + '\')">删除</button></div></div>';
+    const busy = POLICY_PENDING.has(p.key_fingerprint);
+    return '<div class="policy-row '+(p.enabled?'':'policy-disabled')+'"><div class="row"><div class="grow policy-content"><h3>' + esc(p.name) + '</h3><div class="policy-meta"><span>Key ' + esc(p.key_hint) + '</span><span>' + esc(clientTypeLabel(type)) + '</span><span>' + (p.rules || []).length + ' 条规则</span><span class="tag ' + (strict ? 'ok' : '') + '">Affinity ' + (strict ? 'Strict' : 'Off') + '</span></div><div class="policy-models">'+(p.rules||[]).map((r)=>'<span class="tag">'+esc((r.models||[]).join(', ')||'未设置模型')+'</span>').join('')+'</div></div><div class="policy-actions"><div class="switch-line policy-enable"><span class="small '+(p.enabled?'green':'muted')+'">'+(busy?'保存中…':p.enabled?'已启用':'已停用')+'</span><button type="button" id="policy-toggle-'+esc(p.key_fingerprint)+'" class="switch '+(p.enabled?'on':'')+'" role="switch" aria-checked="'+Boolean(p.enabled)+'" aria-label="'+esc((p.enabled?'停用 ':'启用 ')+p.name)+'" '+(pending?'disabled '+(busy?'aria-busy="true"':''):'')+' onclick="togglePolicyEnabled(\''+esc(p.key_fingerprint)+'\')"></button></div><button class="btn small" '+(pending?'disabled':'')+' onclick="diagnose(\'' + esc(p.key_fingerprint) + '\')">诊断</button><button class="btn small" '+(pending?'disabled':'')+' onclick="openPolicy(\'' + esc(p.key_fingerprint) + '\')">编辑</button><button class="btn small danger" '+(pending?'disabled':'')+' onclick="delPolicy(\'' + esc(p.key_fingerprint) + '\')">删除</button></div></div></div>';
   }).join('');
+  restoreControlFocus(focused);
+}
+
+async function togglePolicyEnabled(fp) {
+  if (POLICY_PENDING.size || POLICY_SAVING) return;
+  const focused = document.activeElement?.id;
+  const current = (SNAP.policies || []).find((p)=>p.key_fingerprint===fp);
+  if (!current) return;
+  const enabled = !current.enabled;
+  POLICY_PENDING.add(fp);
+  $('policyNotice').textContent = '';
+  renderPolicies();
+  try {
+    // Use the latest persisted definition, never the editor draft or an old list snapshot.
+    const latest = await api({action:'snapshot'});
+    const found = (latest.policies || []).find((p)=>p.key_fingerprint===fp);
+    if (!found) throw new Error('Policy 已不存在，请刷新列表');
+    const updated = JSON.parse(JSON.stringify(found));
+    updated.enabled = enabled;
+    SNAP = await api({action:'save_policy',payload:JSON.stringify(updated)});
+    $('policyNotice').textContent = (updated.name || 'Policy') + (enabled?' 已启用':' 已停用');
+  } catch (e) {
+    // A disconnected response may follow a successful write. Read back, never retry blindly.
+    try { SNAP = await api({action:'snapshot'}); } catch (_) { /* Keep last confirmed state. */ }
+    $('policyNotice').textContent = '切换状态未确认：' + (e.message || e) + '。请核对当前状态后再操作。';
+  } finally {
+    POLICY_PENDING.delete(fp);
+    renderAll();
+    if (CURRENT_VIEW === 'policy') restoreControlFocus(focused);
+  }
 }
 
 function availableKeys(editFp) {
@@ -319,17 +379,18 @@ function renderClientTypes() {
 }
 
 function openPolicy(fp) {
+  if (POLICY_SAVING || POLICY_PENDING.size) return;
   const found = fp ? (SNAP.policies || []).find((x) => x.key_fingerprint === fp) : null;
   EDIT = found ? JSON.parse(JSON.stringify(found)) : {
     name:'', key_fingerprint:'', key_hint:'', enabled:true,
     client_type:'', client_provider:'', client_affinity:'off', rules:[defaultRule()]
   };
-  RULE_SEARCH = {};
+  RULE_UI = new WeakMap();
   EDIT.client_affinity = EDIT.client_affinity || 'off';
   EDIT.client_type = EDIT.client_type || EDIT.client_provider || '';
   $('policyTitle').textContent = fp ? '编辑 Policy' : '新建 Policy';
   $('pName').value = EDIT.name || '';
-  $('pEnabled').value = String(EDIT.enabled !== false);
+  renderPolicyEnabled();
   const keys = availableKeys(fp);
   $('pKey').innerHTML = keys.map((k) => {
     const label = k.alias ? k.alias + ' · ' + k.hint : k.hint;
@@ -340,12 +401,33 @@ function openPolicy(fp) {
   renderAffinityState();
   renderRules();
   showView('policyEditor');
+  EDIT_BASELINE = editorSignature();
 }
 
 function closePolicy() {
+  if (POLICY_SAVING) return;
+  if (EDIT && editorSignature() !== EDIT_BASELINE && !confirm('尚有未保存的修改，确定放弃吗？')) return;
   EDIT = null;
-  RULE_SEARCH = {};
+  RULE_UI = new WeakMap();
   showView('policy');
+}
+
+function renderPolicyEnabled() {
+  if (!EDIT) return;
+  const enabled = EDIT.enabled !== false;
+  $('pEnabledToggle').classList.toggle('on', enabled);
+  $('pEnabledToggle').setAttribute('aria-checked', String(enabled));
+  $('pEnabledSummary').textContent = enabled ? '启用，保存后参与路由' : '停用，保存后不参与路由';
+}
+
+function toggleEditorEnabled() {
+  if (!EDIT) return;
+  EDIT.enabled = EDIT.enabled === false;
+  renderPolicyEnabled();
+}
+
+function editorSignature() {
+  return JSON.stringify({...EDIT, name:$('pName').value, key_fingerprint:$('pKey').value, client_type:$('pClientType').value});
 }
 
 function renderAffinityState() {
@@ -353,6 +435,7 @@ function renderAffinityState() {
   const supported = EDIT.client_affinity === 'off' || EDIT.client_affinity === 'strict';
   const strict = EDIT.client_affinity === 'strict';
   $('pAffinityToggle').classList.toggle('on', strict);
+  $('pAffinityToggle').setAttribute('aria-checked', String(strict));
   $('affinitySummary').textContent = strict ? '开启（严格模式）' : supported ? '关闭' : '当前值不受支持：' + EDIT.client_affinity;
   if (!supported) {
     $('affinityNote').className = 'info warnbox';
@@ -389,8 +472,11 @@ function defaultRule() {
 
 function addRule() {
   EDIT.rules = EDIT.rules || [];
-  EDIT.rules.push(defaultRule());
+  const rule = defaultRule();
+  EDIT.rules.push(rule);
+  ruleUI(rule, EDIT.rules.length-1).open = true;
   renderRules();
+  $('rule-card-'+(EDIT.rules.length-1))?.scrollIntoView({behavior:'smooth',block:'start'});
 }
 
 function moveRule(i,d) {
@@ -398,6 +484,50 @@ function moveRule(i,d) {
   if (j<0 || j>=EDIT.rules.length) return;
   [EDIT.rules[i],EDIT.rules[j]]=[EDIT.rules[j],EDIT.rules[i]];
   renderRules();
+}
+
+function deleteRule(ri) {
+  EDIT.rules.splice(ri,1);
+  renderRules();
+}
+
+function ruleUI(rule, index) {
+  if (!RULE_UI.has(rule)) RULE_UI.set(rule, {open:index===0, advanced:false, pool:!(rule.candidates||[]).length, filtered:false, search:''});
+  return RULE_UI.get(rule);
+}
+
+function setRuleSection(ri, key, open) {
+  if (EDIT?.rules?.[ri] && ['open','advanced','pool','filtered'].includes(key)) ruleUI(EDIT.rules[ri],ri)[key] = open;
+}
+
+const STRATEGIES = [
+  ['ordered-failover','有序 Failover','按候选顺序依次尝试'],
+  ['round-robin','轮询','轮流选择首选候选'],
+  ['weighted-round-robin','加权轮询','按 Weight 分配流量'],
+  ['priority-weighted','Priority + Weight','先优先级，再按权重分配'],
+  ['sticky','Sticky','让同一会话尽量命中同一资源'],
+  ['cpa-default','CPA 默认','不接管，交回 CPA 路由']
+];
+
+function selectRuleStrategy(ri, strategy) {
+  if (!STRATEGIES.some(([key])=>key===strategy)) return;
+  EDIT.rules[ri].strategy = strategy;
+  renderRules();
+}
+
+function strategyLabel(value) { return STRATEGIES.find(([key])=>key===value)?.[1] || value; }
+
+function refreshRuleSummary(ri) {
+  const r = EDIT.rules[ri];
+  const title = $('rule-title-'+ri), meta = $('rule-meta-'+ri);
+  if (title) title.textContent = r.name || '未命名规则';
+  if (meta) meta.textContent = (r.models||[]).join(', ') + ' · ' + strategyLabel(r.strategy) + ' · ' + (r.candidates||[]).length + ' 个候选';
+}
+
+function refreshFailoverSummary(ri) {
+  const f = EDIT.rules[ri].failover;
+  const summary = $('failover-summary-'+ri);
+  if (summary) summary.textContent = '最大尝试 '+(f.max_attempts||'自动')+' 次 · 耗尽后'+(f.exhausted==='cpa-default'?'转 CPA 默认':'返回错误');
 }
 
 function strategyOptions(v) {
@@ -452,7 +582,7 @@ function candidateSelected(rule, res) {
 }
 
 function ruleResourcePoolHTML(r,ri) {
-  const query = String(RULE_SEARCH[ri] || '').toLowerCase();
+  const query = ruleUI(r,ri).search.trim().toLowerCase();
   const resources = (SNAP.resources || []).filter((x) => {
     if (!query) return true;
     return [x.alias,x.display_name,x.provider,x.base_url,x.key_hint,x.auth_index].some((v) => String(v || '').toLowerCase().includes(query));
@@ -465,67 +595,49 @@ function ruleResourcePoolHTML(r,ri) {
       : 'Affinity 关闭：全部资源均可选择。') + '</div>';
   h += resourcePoolTable(r,ri,available,false);
   if (filtered.length) {
-    h += '<div class="candidate-title" style="margin-top:10px">已被 Client Affinity 过滤（'+filtered.length+'）</div>' +
-      resourcePoolTable(r,ri,filtered,true);
+    h += '<details class="filtered-details" '+(ruleUI(r,ri).filtered?'open':'')+' ontoggle="if(this.isConnected)setRuleSection('+ri+',\'filtered\',this.open)"><summary>查看被 Client Affinity 过滤的资源（'+filtered.length+'）</summary>' + resourcePoolTable(r,ri,filtered,true) + '</details>';
   }
   return h;
 }
 
 function updateRuleResourceSearch(ri,value) {
-  RULE_SEARCH[ri] = value;
+  if (!EDIT?.rules?.[ri]) return;
+  ruleUI(EDIT.rules[ri],ri).search = value;
   const pool = $('rule-resource-pool-' + ri);
   if (pool && EDIT && EDIT.rules && EDIT.rules[ri]) {
     pool.innerHTML = ruleResourcePoolHTML(EDIT.rules[ri],ri);
   }
 }
 
-function renderRules() {
+function renderRules(focusID) {
   if (!EDIT) return;
+  const focused = focusID || document.activeElement?.id;
   const rules = EDIT.rules || [];
+  $('ruleCount').textContent = rules.length + ' 条规则';
   if (!rules.length) {
-    $('rules').innerHTML = '<div class="empty" style="margin-top:14px">尚无模型规则。<div style="margin-top:10px"><button class="btn" onclick="addRule()">＋ 新增规则</button></div></div>';
+    $('rules').innerHTML = '<div class="empty" style="margin-top:14px">尚无模型规则，请新增规则。</div>';
     return;
   }
   $('rules').innerHTML = rules.map((r,ri) => {
     r.failover = r.failover || defaultRule().failover;
-    const f = strategyFields(r.strategy);
-    let h = '<div class="rule-card"><div class="rule-head"><span class="rule-num">' + (ri+1) + '</span><b>' + esc(r.name || '规则') + '</b><div class="rule-actions"><button class="btn small" onclick="moveRule(' + ri + ',-1)">↑</button><button class="btn small" onclick="moveRule(' + ri + ',1)">↓</button><button class="btn small danger" onclick="EDIT.rules.splice(' + ri + ',1);renderRules()">删除</button></div></div>';
-    h += '<div class="grid3"><div><label>Rule 名称 *</label><input value="' + esc(r.name || '') + '" oninput="EDIT.rules['+ri+'].name=this.value"></div><div><label>匹配模型 *</label><input value="' + esc((r.models || ['*']).join(',')) + '" oninput="EDIT.rules['+ri+'].models=this.value.split(/[,;\\n]+/)"></div><div><label>路由策略 *</label><select onchange="EDIT.rules['+ri+'].strategy=this.value;renderRules()">' + strategyOptions(r.strategy) + '</select></div></div>';
-
-    let sticky = '';
+    const f = strategyFields(r.strategy), ui = ruleUI(r,ri);
+    let h = '<details class="rule-card" id="rule-card-'+ri+'" '+(ui.open?'open':'')+' ontoggle="if(this.isConnected)setRuleSection('+ri+',\'open\',this.open)"><summary class="rule-summary"><span class="rule-num">'+(ri+1)+'</span><span class="grow"><b id="rule-title-'+ri+'">'+esc(r.name||'未命名规则')+'</b><span class="rule-summary-meta" id="rule-meta-'+ri+'">'+esc((r.models||[]).join(', '))+' · '+esc(strategyLabel(r.strategy))+' · '+(r.candidates||[]).length+' 个候选</span></span><span class="disclosure-arrow" aria-hidden="true">⌄</span></summary><div class="rule-body">';
+    h += '<div class="rule-head"><span class="muted small grow">先设置匹配条件，再选择路由方式与候选资源。</span><div class="rule-actions"><button class="btn small" aria-label="上移规则" '+(ri===0?'disabled':'')+' onclick="moveRule('+ri+',-1)">↑</button><button class="btn small" aria-label="下移规则" '+(ri===rules.length-1?'disabled':'')+' onclick="moveRule('+ri+',1)">↓</button><button class="btn small danger" onclick="deleteRule('+ri+')">删除规则</button></div></div>';
+    h += '<div class="grid2"><div><label for="rule-name-'+ri+'">Rule 名称 *</label><input id="rule-name-'+ri+'" value="'+esc(r.name||'')+'" oninput="EDIT.rules['+ri+'].name=this.value;refreshRuleSummary('+ri+')"></div><div><label for="rule-models-'+ri+'">匹配模型 *</label><input id="rule-models-'+ri+'" value="'+esc((r.models||['*']).join(','))+'" oninput="EDIT.rules['+ri+'].models=this.value.split(/[,;\\n]+/);refreshRuleSummary('+ri+')"><div class="field-help">支持 * / ? 通配符；多个模型用逗号分隔。</div></div></div>';
+    h += '<div class="setting-section"><h3 class="section-label" id="strategy-label-'+ri+'">路由策略</h3><div class="strategy-grid" role="group" aria-labelledby="strategy-label-'+ri+'">'+STRATEGIES.map(([key,name,desc])=>'<button type="button" id="strategy-'+ri+'-'+key+'" class="strategy-option '+(r.strategy===key?'active':'')+'" aria-pressed="'+(r.strategy===key)+'" onclick="selectRuleStrategy('+ri+',\''+key+'\')"><b>'+name+'</b><span>'+desc+'</span></button>').join('')+'</div></div>';
+    if (r.strategy === 'cpa-default') return h+'<div class="oknote" style="margin-top:16px">命中此 Rule 时不执行候选资源，直接交给 CPA 默认路由。原有候选与 Failover 配置仍会保留。</div></div></details>';
     if (r.strategy === 'sticky') {
-      sticky = '<div><label>Sticky 来源</label><select onchange="EDIT.rules['+ri+'].sticky_source=this.value;renderRules()"><option value="auto" '+((r.sticky_source||'auto')==='auto'?'selected':'')+'>自动</option><option value="session" '+(r.sticky_source==='session'?'selected':'')+'>Session</option><option value="header" '+(r.sticky_source==='header'?'selected':'')+'>指定 Header</option></select></div>';
-      if (r.sticky_source === 'header') {
-        sticky += '<div><label>Sticky Header *</label><input value="'+esc(r.sticky_header||'')+'" placeholder="例如：X-Session-Id" oninput="EDIT.rules['+ri+'].sticky_header=this.value"></div>';
-      }
+      h += '<div class="advanced grid2" style="margin-top:14px"><div><label for="sticky-source-'+ri+'">Sticky 来源</label><select id="sticky-source-'+ri+'" onchange="EDIT.rules['+ri+'].sticky_source=this.value;renderRules()"><option value="auto" '+((r.sticky_source||'auto')==='auto'?'selected':'')+'>自动</option><option value="session" '+(r.sticky_source==='session'?'selected':'')+'>Session</option><option value="header" '+(r.sticky_source==='header'?'selected':'')+'>指定 Header</option></select></div>'+(r.sticky_source==='header'?'<div><label for="sticky-header-'+ri+'">Sticky Header *</label><input id="sticky-header-'+ri+'" value="'+esc(r.sticky_header||'')+'" placeholder="例如：X-Session-Id" oninput="EDIT.rules['+ri+'].sticky_header=this.value"></div>':'')+'</div>';
     }
-
-    h += '<div class="advanced" style="margin-top:12px"><div class="grid4">' +
-      sticky +
-      '<div><label>候选耗尽后</label><select onchange="EDIT.rules['+ri+'].failover.exhausted=this.value"><option value="error" '+(r.failover.exhausted!=='cpa-default'?'selected':'')+'>返回错误</option><option value="cpa-default" '+(r.failover.exhausted==='cpa-default'?'selected':'')+'>转 CPA 默认</option></select></div>' +
-      '<div><label>Max Attempts</label><input type="number" min="0" value="'+(r.failover.max_attempts||0)+'" oninput="EDIT.rules['+ri+'].failover.max_attempts=+this.value||0"></div>' +
-      '</div><div style="font-weight:800;margin:14px 0 8px">按错误类型的 Failover</div><div class="grid4">' +
-      '<div><label>网络错误</label><select onchange="EDIT.rules['+ri+'].failover.network=this.value">'+failActionOptions(r.failover.network)+'</select></div>' +
-      '<div><label>401 / 403</label><select onchange="EDIT.rules['+ri+'].failover.unauthorized=this.value">'+failActionOptions(r.failover.unauthorized)+'</select></div>' +
-      '<div><label>408 Timeout</label><select onchange="EDIT.rules['+ri+'].failover.timeout=this.value">'+failActionOptions(r.failover.timeout)+'</select></div>' +
-      '<div><label>409 Conflict</label><select onchange="EDIT.rules['+ri+'].failover.conflict=this.value">'+failActionOptions(r.failover.conflict)+'</select></div>' +
-      '<div><label>429 Rate Limit</label><select onchange="EDIT.rules['+ri+'].failover.rate_limit=this.value">'+failActionOptions(r.failover.rate_limit)+'</select></div>' +
-      '<div><label>5xx</label><select onchange="EDIT.rules['+ri+'].failover.server_error=this.value">'+failActionOptions(r.failover.server_error)+'</select></div>' +
-      '<div><label>其他错误</label><select onchange="EDIT.rules['+ri+'].failover.other=this.value">'+failActionOptions(r.failover.other)+'</select></div>' +
-      '</div></div>';
-
-    if (r.strategy === 'cpa-default') {
-      h += '<div class="oknote" style="margin-top:12px">命中此 Rule 时不执行候选资源，直接交给 CPA 默认路由。</div></div>';
-      return h;
+    h += '<div class="candidate-section"><div class="section-heading"><h3 class="section-label">已选候选资源 <span class="tag">'+(r.candidates||[]).length+'</span></h3><span class="field-help">'+(f.priority?'Priority 越大越优先；':'按顺序排列；')+(f.weight?'Weight 为相对权重。':'可拖动或用箭头排序。')+'</span></div>'+selectedCandidatesTable(r,ri,f)+'</div>';
+    h += '<details class="resource-picker" '+(ui.pool?'open':'')+' ontoggle="if(this.isConnected)setRuleSection('+ri+',\'pool\',this.open)"><summary>＋ 添加候选资源 <span class="muted small">从 '+(SNAP.resources||[]).length+' 个上游资源中选择</span></summary><div class="picker-body"><div class="toolbar"><input class="search" aria-label="搜索候选资源" value="'+esc(ui.search)+'" placeholder="搜索资源别名、Provider、URL 或账号…" oninput="updateRuleResourceSearch('+ri+',this.value)"></div><div id="rule-resource-pool-'+ri+'">'+ruleResourcePoolHTML(r,ri)+'</div></div></details>';
+    h += '<details class="advanced failover-details" '+(ui.advanced?'open':'')+' ontoggle="if(this.isConnected)setRuleSection('+ri+',\'advanced\',this.open)"><summary><b>高级设置 · Failover</b><span class="muted small" id="failover-summary-'+ri+'">最大尝试 '+(r.failover.max_attempts||'自动')+' 次 · 耗尽后'+(r.failover.exhausted==='cpa-default'?'转 CPA 默认':'返回错误')+'</span></summary><div class="advanced-body"><div class="grid2"><div><label for="exhausted-'+ri+'">候选耗尽后</label><select id="exhausted-'+ri+'" onchange="EDIT.rules['+ri+'].failover.exhausted=this.value;refreshFailoverSummary('+ri+')"><option value="error" '+(r.failover.exhausted!=='cpa-default'?'selected':'')+'>返回错误</option><option value="cpa-default" '+(r.failover.exhausted==='cpa-default'?'selected':'')+'>转 CPA 默认</option></select></div><div><label for="attempts-'+ri+'">最大尝试次数</label><input id="attempts-'+ri+'" type="number" min="0" value="'+(r.failover.max_attempts||0)+'" oninput="EDIT.rules['+ri+'].failover.max_attempts=+this.value||0;refreshFailoverSummary('+ri+')"><div class="field-help">0 表示按候选数量自动决定。</div></div></div><h3 class="section-label" style="margin:18px 0 10px">按错误类型处理</h3><div class="failover-grid">';
+    for (const [key,label] of [['network','网络错误'],['unauthorized','401 / 403'],['timeout','408 Timeout'],['conflict','409 Conflict'],['rate_limit','429 Rate Limit'],['server_error','5xx'],['other','其他错误']]) {
+      h += '<div class="failover-field"><label for="fail-'+ri+'-'+key+'">'+label+'</label><select id="fail-'+ri+'-'+key+'" onchange="EDIT.rules['+ri+'].failover.'+key+'=this.value">'+failActionOptions(r.failover[key])+'</select></div>';
     }
-
-    h += '<div class="candidate-section"><div class="candidate-title">候选资源</div><div class="toolbar"><input class="search" value="'+esc(RULE_SEARCH[ri]||'')+'" placeholder="搜索资源别名、Provider 或 URL…" oninput="updateRuleResourceSearch('+ri+',this.value)"><span class="muted small">客户端类型：'+esc(clientTypeLabel(EDIT.client_type))+' · Client Affinity '+(EDIT.client_affinity==='strict'?'已开启':'未开启')+'</span></div>';
-    h += '<div id="rule-resource-pool-'+ri+'">' + ruleResourcePoolHTML(r,ri) + '</div>';
-    h += '<div class="candidate-title" style="margin-top:14px">已选候选资源（'+(r.candidates||[]).length+'）</div>';
-    h += selectedCandidatesTable(r,ri,f);
-    h += '</div></div>';
-    return h;
+    return h+'</div></div></details></div></details>';
   }).join('');
+  restoreControlFocus(focused);
 }
 
 function resourcePoolTable(rule,ri,resources,filtered) {
@@ -540,14 +652,35 @@ function resourcePoolTable(rule,ri,resources,filtered) {
 
 function selectedCandidatesTable(r,ri,f) {
   const xs=r.candidates||[];
-  if (!xs.length) return '<div class="empty">尚未选择候选资源</div>';
-  return '<div class="table-wrap"><table class="data-table selected-table"><thead><tr><th></th><th>资源别名</th><th>类型</th><th>Provider</th><th>Endpoint / 账号</th>'+(f.priority?'<th>Priority</th>':'')+(f.weight?'<th>Weight</th>':'')+'<th>模型重写</th><th>状态</th><th>操作</th></tr></thead><tbody>'+
+  if (!xs.length) return '<div class="empty">尚未选择候选资源，请在下方展开资源列表添加。</div>';
+  return '<div class="table-wrap"><table class="data-table selected-table"><thead><tr><th>顺序</th><th>资源别名</th><th>类型</th><th>Provider</th><th>Endpoint / 账号</th>'+(f.priority?'<th>Priority</th>':'')+(f.weight?'<th>Weight</th>':'')+'<th>模型重写</th><th>状态</th><th>操作</th></tr></thead><tbody>'+
     xs.map((c,ci) => {
       const res=(SNAP.resources||[]).find((x)=>x.id===c.resource_id);
       const allowed=!res||resourceAllowedByAffinity(res);
       const ep=res?resourceEndpoint(res):(c.auth_index||'当前资源不可见');
-      return '<tr draggable="true" ondragstart="dragCandidate('+ri+','+ci+')" ondragover="event.preventDefault()" ondrop="dropCandidate('+ri+','+ci+')" '+(!allowed?'class="filtered"':'')+'><td class="drag">⋮⋮</td><td><b>'+esc(res ? resourceLabel(res) : (c.name||'-'))+'</b>'+(!res?'<div class="warn small">当前资源不可见</div>':!allowed?'<div class="warn small">当前 Affinity 不允许</div>':'')+'</td><td><span class="tag '+(String(c.resource_kind||res?.kind).toLowerCase()==='oauth'?'oauth':'api')+'">'+esc(c.resource_kind||res?.kind||'-')+'</span></td><td><span class="tag">'+esc(c.provider||res?.provider||'-')+'</span></td><td class="mono">'+esc(ep)+'</td>'+(f.priority?'<td><input type="number" value="'+(c.priority||100)+'" oninput="EDIT.rules['+ri+'].candidates['+ci+'].priority=+this.value||100"></td>':'')+(f.weight?'<td><input type="number" min="1" value="'+(c.weight||1)+'" oninput="EDIT.rules['+ri+'].candidates['+ci+'].weight=+this.value||1"></td>':'')+'<td><input value="'+esc(c.override_model||'')+'" placeholder="留空 = 沿用客户端请求模型" oninput="EDIT.rules['+ri+'].candidates['+ci+'].override_model=this.value"></td><td><select onchange="EDIT.rules['+ri+'].candidates['+ci+'].enabled=this.value===\'true\'"><option value="true" '+(c.enabled!==false?'selected':'')+'>● 启用</option><option value="false" '+(c.enabled===false?'selected':'')+'>停用</option></select></td><td><button class="btn small danger" onclick="EDIT.rules['+ri+'].candidates.splice('+ci+',1);renderRules()">删除</button></td></tr>';
+      const name = res ? resourceLabel(res) : (c.name||'-');
+      return '<tr draggable="true" ondragstart="dragCandidate('+ri+','+ci+')" ondragover="event.preventDefault()" ondrop="dropCandidate('+ri+','+ci+')" '+(!allowed?'class="filtered"':'')+'><td><div class="candidate-order"><span class="drag" title="拖动排序">⋮⋮</span><button class="btn small" id="candidate-up-'+ri+'-'+ci+'" aria-label="上移候选 '+esc(name)+'" '+(ci===0?'disabled':'')+' onclick="moveCandidate('+ri+','+ci+',-1)">↑</button><button class="btn small" id="candidate-down-'+ri+'-'+ci+'" aria-label="下移候选 '+esc(name)+'" '+(ci===xs.length-1?'disabled':'')+' onclick="moveCandidate('+ri+','+ci+',1)">↓</button></div></td><td><b>'+esc(name)+'</b>'+(!res?'<div class="warn small">当前资源不可见</div>':!allowed?'<div class="warn small">当前 Affinity 不允许</div>':'')+'</td><td><span class="tag '+(String(c.resource_kind||res?.kind).toLowerCase()==='oauth'?'oauth':'api')+'">'+esc(c.resource_kind||res?.kind||'-')+'</span></td><td><span class="tag">'+esc(c.provider||res?.provider||'-')+'</span></td><td class="mono">'+esc(ep)+'</td>'+(f.priority?'<td><input aria-label="'+esc(name)+' Priority" type="number" value="'+(c.priority??100)+'" oninput="EDIT.rules['+ri+'].candidates['+ci+'].priority=this.value===\'\'?100:Number(this.value)"></td>':'')+(f.weight?'<td><input aria-label="'+esc(name)+' Weight" type="number" min="1" value="'+(c.weight||1)+'" oninput="EDIT.rules['+ri+'].candidates['+ci+'].weight=+this.value||1"></td>':'')+'<td><input class="model-override" aria-label="'+esc(name)+' 模型重写" value="'+esc(c.override_model||'')+'" placeholder="留空 = 沿用请求模型" oninput="EDIT.rules['+ri+'].candidates['+ci+'].override_model=this.value"></td><td><div class="switch-line"><button type="button" id="candidate-toggle-'+ri+'-'+ci+'" class="switch '+(c.enabled!==false?'on':'')+'" role="switch" aria-checked="'+(c.enabled!==false)+'" aria-label="'+esc('启用候选 '+name)+'" onclick="toggleCandidate('+ri+','+ci+')"></button><span class="small muted">'+(c.enabled!==false?'启用':'停用')+'</span></div></td><td><button class="btn small danger" onclick="EDIT.rules['+ri+'].candidates.splice('+ci+',1);renderRules()">移除</button></td></tr>';
     }).join('')+'</tbody></table></div>';
+}
+
+function toggleCandidate(ri, ci) {
+  const candidate = EDIT.rules[ri].candidates[ci];
+  candidate.enabled = candidate.enabled === false;
+  renderRules();
+}
+
+function moveCandidate(ri, ci, direction) {
+  const candidates = EDIT.rules[ri].candidates;
+  const target = ci + direction;
+  if (target<0 || target>=candidates.length) return;
+  const focused = document.activeElement?.id;
+  let nextFocus;
+  if (focused === 'candidate-up-'+ri+'-'+ci || focused === 'candidate-down-'+ri+'-'+ci) {
+    const action = target === 0 ? 'down' : target === candidates.length-1 ? 'up' : direction < 0 ? 'up' : 'down';
+    nextFocus = 'candidate-'+action+'-'+ri+'-'+target;
+  }
+  [candidates[ci],candidates[target]] = [candidates[target],candidates[ci]];
+  renderRules(nextFocus);
 }
 
 function fromRes(r) {
@@ -563,8 +696,9 @@ function addCand(ri,id) {
   renderRules();
 }
 
-function dragCandidate(ri,ci) { DRAG_CAND={ri,ci}; }
+function dragCandidate(ri,ci) { if (!POLICY_SAVING) DRAG_CAND={ri,ci}; }
 function dropCandidate(ri,ci) {
+  if (POLICY_SAVING) return;
   if (!DRAG_CAND || DRAG_CAND.ri!==ri || DRAG_CAND.ci===ci) return;
   const a=EDIT.rules[ri].candidates;
   const [item]=a.splice(DRAG_CAND.ci,1);
@@ -574,13 +708,18 @@ function dropCandidate(ri,ci) {
 }
 
 async function savePolicy() {
+  if (POLICY_SAVING || !EDIT) return;
+  POLICY_SAVING = true;
+  DRAG_CAND = null;
+  $('policyEditorFields').disabled = true;
+  $('savePolicyButton').disabled = true;
+  $('savePolicyButton').textContent = '保存中…';
   try {
     const sel=$('pKey');
     const hint=sel.options[sel.selectedIndex]?.dataset.hint||'';
     EDIT.name=$('pName').value.trim();
     EDIT.key_fingerprint=sel.value;
     EDIT.key_hint=hint;
-    EDIT.enabled=$('pEnabled').value==='true';
     EDIT.client_type=$('pClientType').value;
     if (EDIT.client_affinity!=='off' && EDIT.client_affinity!=='strict') {
       throw new Error('当前 Client Affinity 模式不受支持，请明确选择关闭或 Strict');
@@ -592,10 +731,16 @@ async function savePolicy() {
     showView('policy');
   } catch(e) {
     alert('保存失败：'+(e.message||e));
+  } finally {
+    POLICY_SAVING = false;
+    $('policyEditorFields').disabled = false;
+    $('savePolicyButton').disabled = false;
+    $('savePolicyButton').textContent = '保存 Policy';
   }
 }
 
 async function delPolicy(fp) {
+  if (POLICY_PENDING.size || POLICY_SAVING) return;
   if (!confirm('删除这套 API Key Policy？')) return;
   SNAP=await api({action:'delete_policy',fingerprint:fp});
   renderAll();
@@ -624,32 +769,50 @@ async function runDiag() {
   $('diagBody').innerHTML=h;
 }
 
+function setResourceFilter(key, value) {
+  if (!['type','provider','status'].includes(key)) return;
+  RESOURCE_FILTERS[key] = value;
+  renderResources();
+}
+
+function resetResourceFilters() {
+  RESOURCE_FILTERS = {type:'all',provider:'all',status:'all'};
+  $('resourceSearch').value = '';
+  renderResources();
+}
+
+function filteredResources(resources, filters, query) {
+  const q = String(query || '').trim().toLowerCase();
+  return resources.filter((r)=>{
+    const st=resourceStatus(r);
+    if (filters.type!=='all' && String(r.kind).toLowerCase()!==filters.type.toLowerCase()) return false;
+    if (filters.provider!=='all' && String(r.provider)!==filters.provider) return false;
+    if (filters.status==='active' && !st.ok) return false;
+    if (filters.status==='disabled' && st.ok) return false;
+    return !q || [r.alias,r.display_name,r.provider,r.base_url,r.key_hint,r.auth_index].some((v)=>String(v||'').toLowerCase().includes(q));
+  });
+}
+
 function renderResourceFilters() {
-  const el=$('resourceProvider');
-  if (!el) return;
-  const current=el.value||'all';
-  const ps=[...new Set((SNAP.resources||[]).map((r)=>r.provider).filter(Boolean))].sort();
-  el.innerHTML='<option value="all">全部 Provider</option>'+ps.map((p)=>'<option value="'+esc(p)+'">'+esc(p)+'</option>').join('');
-  if ([...el.options].some((o)=>o.value===current)) el.value=current;
+  const focused = document.activeElement?.id;
+  const resources = SNAP.resources || [];
+  const ps = [...new Set(resources.map((r)=>r.provider).filter(Boolean))].sort();
+  if (RESOURCE_FILTERS.provider!=='all' && !ps.includes(RESOURCE_FILTERS.provider)) RESOURCE_FILTERS.provider='all';
+  const groups = [['type','类型',[['all','全部'],['API','API'],['OAuth','OAuth']]],['provider','Provider',[['all','全部'],...ps.map((p)=>[p,p])]],['status','状态',[['all','全部'],['active','正常'],['disabled','不可用']]]];
+  $('resourceFilters').innerHTML = groups.map(([key,label,options])=>'<div class="filter-row"><span class="filter-label">'+label+'</span><div class="filter-options" role="group" aria-label="'+label+'筛选">'+options.map(([value,name],index)=>{
+    const count = filteredResources(resources, {...RESOURCE_FILTERS,[key]:value}, $('resourceSearch')?.value).length;
+    return filterChip(name,value,RESOURCE_FILTERS[key]===value,count,'setResourceFilter('+esc(JSON.stringify(key))+','+esc(JSON.stringify(value))+')','resource-filter-'+key+'-'+index);
+  }).join('')+'</div></div>').join('');
+  restoreControlFocus(focused);
 }
 
 function renderResources() {
   if (!$('resourceTable') || !SNAP) return;
   renderResourceFilters();
-  const q=String($('resourceSearch')?.value||'').toLowerCase();
-  const type=$('resourceType')?.value||'all';
-  const provider=$('resourceProvider')?.value||'all';
-  const status=$('resourceStatus')?.value||'all';
-  const xs=(SNAP.resources||[]).filter((r)=>{
-    const st=resourceStatus(r);
-    if (type!=='all' && String(r.kind)!==type) return false;
-    if (provider!=='all' && String(r.provider)!==provider) return false;
-    if (status==='active' && !st.ok) return false;
-    if (status==='disabled' && st.ok) return false;
-    if (q && ![r.alias,r.display_name,r.provider,r.base_url,r.key_hint,r.auth_index].some((v)=>String(v||'').toLowerCase().includes(q))) return false;
-    return true;
-  });
-  if (!xs.length) { $('resourceTable').innerHTML='<div class="empty">没有符合条件的上游资源</div>'; return; }
+  const xs=filteredResources(SNAP.resources||[],RESOURCE_FILTERS,$('resourceSearch')?.value);
+  $('resourceCount').textContent = '显示 '+xs.length+' / '+(SNAP.resources||[]).length+' 个资源';
+  $('resourceReset').hidden = !String($('resourceSearch')?.value||'') && Object.values(RESOURCE_FILTERS).every((x)=>x==='all');
+  if (!xs.length) { $('resourceTable').innerHTML='<div class="empty">没有符合条件的上游资源<div style="margin-top:10px"><button class="btn small" onclick="resetResourceFilters()">清除筛选</button></div></div>'; return; }
   $('resourceTable').innerHTML='<div class="table-wrap"><table class="data-table"><thead><tr><th>资源别名</th><th>类型</th><th>Provider</th><th>Endpoint / 账号</th><th>Prefix</th><th>客户端适配</th><th>状态</th><th>操作</th></tr></thead><tbody>'+
     xs.map((r)=>{
       const st=resourceStatus(r);

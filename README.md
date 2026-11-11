@@ -91,6 +91,14 @@ CLIProxyAPI v7.3.10+ 的 plugin host model callback 已支持 request-scoped `fo
 
 诊断页继续展示 live `auth_id`、实际 `execution_model`、credential prefix、identity 解析错误与 scope 信息。
 
+## Policy 管理界面
+
+- Policy 列表支持搜索与状态快捷筛选，可直接用开关启用 / 停用，无需进入编辑页。切换时保留现有规则配置，并显示保存结果。
+- 编辑页按规则折叠展示；匹配条件与路由策略优先，已选候选始终在前，资源选择与高级 Failover 按需展开。切换策略或折叠分组不会清空隐藏配置。
+- 路由策略以带说明的选项卡展示。候选支持开关与箭头排序，也保留拖动排序。
+- 上游资源使用可组合的类型、Provider、状态按钮筛选，显示匹配数量并支持一键清除。
+- 保存期间锁定编辑控件，离开未保存的草稿前会询问确认。
+
 ## 调度策略
 
 每条 Rule 可独立选择：
@@ -340,6 +348,7 @@ scripts/build.sh
 go test ./...
 go vet ./...
 node --check ui.js
+node --test ../scripts/ui.test.cjs
 c-shared build
 ABI smoke
 binary inspection
