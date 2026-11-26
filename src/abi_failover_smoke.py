@@ -38,6 +38,7 @@ class PluginAPI(Structure):
 
 allocations = []
 attempts = {}
+seen_tickets = set()
 emitted = []
 closed = {}
 reads = {}
@@ -45,9 +46,10 @@ reads = {}
 def envelope(result):
     return json.dumps({"ok": True, "result": result}).encode()
 
-def host_error(message, status):
+def host_error(message, status, request_not_sent=False):
     return json.dumps({"ok": False, "error": {
-        "code": "host_call_failed", "message": message, "http_status": status
+        "code": "host_call_failed", "message": message, "http_status": status,
+        "request_not_sent": request_not_sent
     }}).encode()
 
 def write_buffer(out, data):
@@ -75,7 +77,8 @@ def claim(payload):
     header = payload.get("headers") or {}
     ticket = (header.get("X-Cpa-Key-Chain-Ticket") or
               header.get("X-CPA-Key-Chain-Ticket") or [""])[0]
-    assert ticket, payload
+    assert ticket and ticket not in seen_tickets, payload
+    seen_tickets.add(ticket)
     auth_id = payload["auth_id"]
     provider = payload["forced_provider"]
     picked = invoke("scheduler.pick", {
@@ -130,8 +133,16 @@ def host_call(ctx, method, req, n, out):
                 return 1
         # Only a successfully selected/executed credential claims the scheduler ticket.
         claim(payload)
+        if auth == AUTH_A and model in retry_cases:
+            calls = attempts[model].count(AUTH_A)
+            if model not in ("gpt-retry-partial", "gpt-retry-read-error") and (model in ("gpt-retry-twice", "gpt-retry-stream-twice", "gpt-retry-stream-cap") or calls == 1):
+                # Same status and text; only CPA's explicit outer-envelope
+                # field distinguishes a proven pre-send error from an unknown one.
+                message = 'Post "https://example.test/v1/responses": dial tcp 127.0.0.1:443: connect: connection refused'
+                write_buffer(out, host_error(message, 500, model != "gpt-retry-unproved"))
+                return 0
         if name == "host.model.execute_stream":
-            stream_id = "stream-" + model
+            stream_id = "stream-" + model + "-" + auth
             reads[stream_id] = 0
             write_buffer(out, envelope({"status_code": 200, "stream_id": stream_id, "headers": {}}))
             return 0
@@ -144,8 +155,12 @@ def host_call(ctx, method, req, n, out):
     if name == "host.model.stream_read":
         sid = payload["stream_id"]
         reads[sid] += 1
-        if reads[sid] == 1:
+        if sid == "stream-gpt-retry-read-error-" + AUTH_A:
+            write_buffer(out, envelope({"done": True, "error": "unexpected EOF"}))
+        elif reads[sid] == 1:
             write_buffer(out, envelope({"payload": base64.b64encode(b'data: {"ok":true}\n\n').decode(), "done": False}))
+        elif sid == "stream-gpt-retry-partial-" + AUTH_A:
+            write_buffer(out, envelope({"done": True, "error": "unexpected EOF"}))
         else:
             write_buffer(out, envelope({"done": True}))
         return 0
@@ -175,7 +190,7 @@ assert lib.cliproxy_plugin_init(byref(host), byref(plugin)) == 0
 assert plugin.abi_version == 1
 
 def make_rule(model):
-    return {
+    rule = {
         "id": "rule-" + model, "name": model, "models": [model],
         "strategy": "ordered-failover", "failover": {
             "network": "next", "rate_limit": "next", "server_error": "next", "exhausted": "error"
@@ -190,8 +205,33 @@ def make_rule(model):
         ],
     }
 
+    if model in retry_cases and model != "gpt-retry-disabled":
+        rule["strategy"] = "sticky"
+        rule["failover"]["retry_before_switch"] = True
+    if model == "gpt-retry-max-one":
+        rule["failover"]["max_attempts"] = 1
+    if model == "gpt-retry-stream-cap":
+        rule["failover"]["max_attempts"] = 3
+    if model == "gpt-retry-network-stop":
+        rule["failover"]["network"] = "stop"
+    return rule
+
+retry_cases = {
+    "gpt-retry-recovered": [AUTH_A, AUTH_A],
+    "gpt-retry-twice": [AUTH_A, AUTH_A, AUTH_B],
+    "gpt-retry-stream": [AUTH_A, AUTH_A],
+    "gpt-retry-stream-twice": [AUTH_A, AUTH_A, AUTH_B],
+    "gpt-retry-stream-cap": [AUTH_A, AUTH_A, AUTH_B],
+    "gpt-retry-read-error": [AUTH_A, AUTH_B],
+    "gpt-retry-unproved": [AUTH_A, AUTH_B],
+    "gpt-retry-disabled": [AUTH_A, AUTH_B],
+    "gpt-retry-max-one": [AUTH_A],
+    "gpt-retry-network-stop": [AUTH_A],
+    "gpt-retry-partial": [AUTH_A],
+}
+failed = {"gpt-unclaimed-upstream", "gpt-retry-max-one", "gpt-retry-network-stop", "gpt-retry-partial"}
 models = ["gpt-quota", "gpt-auth-unavailable", "gpt-no-provider",
-          "gpt-claimed-429", "gpt-unclaimed-upstream", "gpt-stream-quota"]
+          "gpt-claimed-429", "gpt-unclaimed-upstream", "gpt-stream-quota", *retry_cases]
 
 with tempfile.TemporaryDirectory() as directory:
     state_file = os.path.join(directory, "state.json")
@@ -229,23 +269,31 @@ with tempfile.TemporaryDirectory() as directory:
             while args["stream_id"] not in closed and time.time() < deadline:
                 time.sleep(0.01)
             assert args["stream_id"] in closed, "stream never finished"
-            assert closed[args["stream_id"]] == "", closed
+            assert closed[args["stream_id"]] == ("unexpected EOF" if model == "gpt-retry-partial" else ""), closed
         else:
             result = invoke("executor.execute", args)
             assert json.loads(base64.b64decode(result["Payload"]))["ok"] is True, result
 
     for model in models:
-        if model == "gpt-unclaimed-upstream":
-            try:
-                execute(model)
-            except RuntimeError as err:
+        stream = model in ("gpt-stream-quota", "gpt-retry-stream", "gpt-retry-stream-twice",
+                           "gpt-retry-stream-cap", "gpt-retry-read-error", "gpt-retry-partial")
+        try:
+            execute(model, stream=stream)
+        except RuntimeError as err:
+            assert model in failed and not stream, (model, err)
+            if model == "gpt-unclaimed-upstream":
                 assert "scheduler did not claim execution ticket" in str(err), err
-            else:
-                raise AssertionError("unclaimed upstream 503 should remain terminal")
-            assert attempts[model] == [AUTH_A], attempts[model]
-            continue
-        execute(model, stream=(model == "gpt-stream-quota"))
-        assert attempts[model] == [AUTH_A, AUTH_B], (model, attempts[model])
+        else:
+            assert model not in failed or stream, model
+        expected = retry_cases.get(model, [AUTH_A] if model in failed else [AUTH_A, AUTH_B])
+        assert attempts[model] == expected, (model, attempts[model])
+    # The successful local retry must not cool A; a subsequent request
+    # should use A immediately, rather than silently sticking to B.
+    execute("gpt-retry-recovered")
+    assert attempts["gpt-retry-recovered"] == [AUTH_A, AUTH_A, AUTH_A]
+    # An exhausted local retry must cool A, and the next request uses B.
+    execute("gpt-retry-twice")
+    assert attempts["gpt-retry-twice"] == [AUTH_A, AUTH_A, AUTH_B, AUTH_B]
 
     snapshot = invoke("management.handle", {
         "Method": "GET", "Path": "/v0/resource/plugins/key-chain-router/api",
@@ -255,12 +303,13 @@ with tempfile.TemporaryDirectory() as directory:
     for model in models:
         matching = [e for e in events if e.get("model") == model]
         assert matching, (model, events)
-        ev = matching[0]
-        if model == "gpt-unclaimed-upstream":
-            assert not ev["success"] and len(ev["attempts"]) == 1, ev
-        else:
-            assert ev["success"] and ev["final"] == "B", ev
-            assert [a["candidate"] for a in ev["attempts"]] == ["A", "B"], ev
+        expected = retry_cases.get(model, [AUTH_A] if model in failed else [AUTH_A, AUTH_B])
+        for ev in matching:
+            assert ev.get("success", False) == (model not in failed), ev
+        ev = max(matching, key=lambda e: len(e["attempts"]))
+        assert [a["candidate"] for a in ev["attempts"]] == ["A" if a == AUTH_A else "B" for a in expected], ev
+        if expected[:2] == [AUTH_A, AUTH_A]:
+            assert "重试原候选" in ev["selection_reasons"][1], ev
     assert emitted and b"data:" in b"".join(emitted), emitted
 
 plugin.shutdown()

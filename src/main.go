@@ -108,12 +108,14 @@ type envelopeError struct {
 	Code       string `json:"code"`
 	Message    string `json:"message"`
 	HTTPStatus int    `json:"http_status,omitempty"`
+	RequestNotSent bool `json:"request_not_sent,omitempty"`
 }
 
 type hostCallbackError struct {
 	Code       string
 	Message    string
 	HTTPStatus int
+	RequestNotSent bool
 }
 
 func (e *hostCallbackError) Error() string {
@@ -1652,7 +1654,7 @@ func callHost(method string, payload any) (json.RawMessage, error) {
 	}
 	if !env.OK {
 		if env.Error != nil {
-			return nil, &hostCallbackError{Code: env.Error.Code, Message: env.Error.Message, HTTPStatus: env.Error.HTTPStatus}
+			return nil, &hostCallbackError{Code: env.Error.Code, Message: env.Error.Message, HTTPStatus: env.Error.HTTPStatus, RequestNotSent: env.Error.RequestNotSent}
 		}
 		return nil, fmt.Errorf("host callback %s failed", method)
 	}

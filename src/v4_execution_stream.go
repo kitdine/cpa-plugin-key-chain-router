@@ -16,7 +16,11 @@ func runStreamPolicyV4(trace string, p *Policy, r *PolicyRule, ranked []*PolicyC
 	currentPriority := math.MaxInt
 	nextAction := failNext
 	max := r.Failover.MaxAttempts
-	if max <= 0 { max = len(ranked) }
+	if max <= 0 {
+		max = len(ranked)
+		if r.Failover.RetryBeforeSwitch { max++ }
+	}
+	retry := candidateRetryV4{enabled: r.Failover.RetryBeforeSwitch}
 	var lastErr error
 	var activeCandidate *PolicyCandidate
 	activeProbe := false
@@ -36,9 +40,10 @@ func runStreamPolicyV4(trace string, p *Policy, r *PolicyRule, ranked []*PolicyC
 		attempted[c.ID] = true
 		currentPriority = c.Priority
 
-		resp, ar, err := executeCandidateV4(c, source, clientModel, body, headers, query, alt, callbackID, true)
+		resp, ar, err := retry.execute(&event, p, r, c, probe, max, func() (hostModelExecutionResponse, attemptResult, error) {
+			return executeCandidateV4(c, source, clientModel, body, headers, query, alt, callbackID, true)
+		})
 		if err != nil {
-			event.Attempts = append(event.Attempts, ar)
 			lastErr = err
 			recordCandidateExecutionFailureV8(p, r, c, ar.Status, err, nil, probe)
 			clearProbeOwnershipV4(&activeProbe)
@@ -51,8 +56,7 @@ func runStreamPolicyV4(trace string, p *Policy, r *PolicyRule, ranked []*PolicyC
 
 		var sr hostModelStreamResponse
 		if err = json.Unmarshal(resp.Body, &sr); err != nil {
-			ar.Error = err.Error()
-			event.Attempts = append(event.Attempts, ar)
+			event.Attempts[len(event.Attempts)-1].Error = err.Error()
 			lastErr = err
 			recordCandidateExecutionFailureV8(p, r, c, 0, err, nil, probe)
 			clearProbeOwnershipV4(&activeProbe)
@@ -62,8 +66,7 @@ func runStreamPolicyV4(trace string, p *Policy, r *PolicyRule, ranked []*PolicyC
 			nextAction = action
 			continue
 		}
-		ar.Status = sr.StatusCode
-		event.Attempts = append(event.Attempts, ar)
+		event.Attempts[len(event.Attempts)-1].Status = sr.StatusCode
 		if sr.StatusCode < 200 || sr.StatusCode >= 400 {
 			if sr.StreamID != "" { _ = closeHostStream(sr.StreamID) }
 			lastErr = fmt.Errorf("upstream status %d", sr.StatusCode)
