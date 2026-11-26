@@ -35,10 +35,3 @@ func TestLegacySyntheticAPIAuthIndexIncludesMultilineFlowStyleHeaders(t *testing
 		t.Fatalf("multiline flow-style runtime ID=%q, want %q", id, want)
 	}
 }
-
-func TestParseFlowStringMapV8PreservesQuotedCommaAndColon(t *testing.T) {
-	got := parseFlowStringMapV8(`{X-A: "a,b:c", 'X-B': 'x:y,z'}`)
-	if got["X-A"] != "a,b:c" || got["X-B"] != "x:y,z" || len(got) != 2 {
-		t.Fatalf("flow headers = %#v", got)
-	}
-}

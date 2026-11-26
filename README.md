@@ -6,6 +6,8 @@ CLIProxyAPI（CPA）v7 的动态策略路由插件。
 
 当前重点兼容：CLIProxyAPI v7.3.10+（schema 5，包含 request-scoped exact AuthID pinning）、Linux amd64 / Debian Bookworm 类环境。
 
+同时支持 CPA v8 的 `access.api-keys` 和分组 `api-keys.<provider>[].keys` 配置，以及旧版平铺格式。插件仅从 CPA 配置读取 API 凭据，不改写配置；已保存的 Policy 仍按精确运行时凭据匹配。
+
 > 版本变更记录请查看 `CHANGELOG.md` 与 GitHub Releases。README 只描述当前版本的用途和使用方式。
 
 ## 解决什么问题

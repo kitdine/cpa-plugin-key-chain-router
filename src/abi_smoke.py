@@ -1,4 +1,4 @@
-import base64, ctypes, hashlib, json, os, sys, tempfile, time
+import base64, ctypes, hashlib, json, os, subprocess, sys, tempfile, time
 from ctypes import *
 
 VERSION=os.environ.get('VERSION','').strip()
@@ -161,7 +161,29 @@ with tempfile.TemporaryDirectory() as td:
     state_path=os.path.join(td,'state.json')
     key='sk-down-xyz'
     fp=hashlib.sha256(key.encode()).hexdigest()
-    open(cfg_path,'w').write('''api-keys:\n  - sk-down-xyz\ncodex-api-key:\n  - api-key: sk-up\n    base-url: https://up.example/v1\n    prefix: plus\n    models:\n      - name: gpt-5.6-luna\n        alias: luna\n''')
+    legacy_cfg = '''api-keys:
+  - sk-down-xyz
+codex-api-key:
+  - api-key: sk-up
+    base-url: https://up.example/v1
+    prefix: plus
+    models:
+      - name: gpt-5.6-luna
+        alias: luna
+'''
+    grouped_cfg = '''config-version: 8
+access:
+  api-keys: [sk-down-xyz]
+api-keys:
+  codex:
+    - name: abi-test
+      base-url: https://up.example/v1
+      prefix: plus
+      models: [{name: gpt-5.6-luna, alias: luna}]
+      keys: [{api-key: sk-up}]
+'''
+    with open(cfg_path, 'w') as f:
+        f.write(grouped_cfg if os.environ.get('CPA_CONFIG_LAYOUT') == 'v8' else legacy_cfg)
     # Feed a v0.3 state with KCR's legacy synthetic API AuthIndex. Current CPA's
     # live ID is different and appears only in scheduler Candidates.
     open(state_path,'w').write(json.dumps({'version':3,'routes':{'r1':{'id':'r1','name':'test','key_fingerprint':fp,'key_hint':'sk-d…-xyz','enabled':True,'match_models':['*'],'candidates':[{'id':'c1','name':'codex-api','resource_id':'api:codex:x:0','resource_kind':'API','provider':'codex','auth_index':LEGACY_API_INDEX,'override_model':'','enabled':True}]}}}))
@@ -184,6 +206,9 @@ with tempfile.TemporaryDirectory() as td:
     assert any(x['Path']=='/status' for x in mr['resources'])
     snap=pcall('management.handle',{'Method':'GET','Path':'/v0/resource/plugins/key-chain-router/api','Query':{'action':['snapshot']},'Headers':{},'Body':''})
     snapbody=json.loads(base64.b64decode(snap['Body']))
+    assert not snapbody.get('config_error'), snapbody.get('config_error')
+    assert any(r['kind'] == 'API' and r.get('auth_id') == LIVE_API_ID
+               for r in snapbody['resources']), snapbody['resources']
     assert len(snapbody['downstream_keys'])==1
     assert len(snapbody['policies'])==1, snapbody
     assert snapbody['policies'][0]['key_fingerprint']==fp
@@ -274,4 +299,8 @@ with tempfile.TemporaryDirectory() as td:
     assert any(x.get('message')=='kcr routing decision' for x in logs), logs
 
 plugin.shutdown()
-print('ABI_SMOKE_PASS')
+print('ABI_SMOKE_PASS', os.environ.get('CPA_CONFIG_LAYOUT', 'legacy'), flush=True)
+if 'CPA_CONFIG_LAYOUT' not in os.environ:
+    # The plugin holds process-wide state; test the second layout in a fresh host.
+    subprocess.run([sys.executable, __file__, SO], check=True,
+                   env={**os.environ, 'CPA_CONFIG_LAYOUT': 'v8'})

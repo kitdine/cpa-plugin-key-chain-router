@@ -1368,7 +1368,11 @@ func currentEnvironment() ([]downstreamKey, []apiResource, string) {
 	if err != nil {
 		return nil, oauthResourcesOnly(), err.Error()
 	}
-	keys, apis := parseCPAConfig(string(data))
+	inv, err := readCPAConfigInventory(string(data))
+	if err != nil {
+		return nil, oauthResourcesOnly(), err.Error()
+	}
+	keys, apis := inv.visible()
 	oauth := oauthResourcesOnly()
 	resources := mergeResources(oauth, apis)
 	return keys, resources, ""
@@ -1434,71 +1438,8 @@ func mergeResources(a, b []apiResource) []apiResource {
 }
 
 func parseCPAConfig(raw string) ([]downstreamKey, []apiResource) {
-	lines := preprocessYAMLLines(raw)
-	keys := parseTopStringList(lines, "api-keys")
-	dks := make([]downstreamKey, 0, len(keys))
-	for _, k := range keys {
-		dks = append(dks, downstreamKey{Fingerprint: fingerprint(k), Hint: maskKey(k)})
-	}
-	resources := []apiResource{}
-	specs := []struct{ Section, Kind, Provider, SeedPrefix string }{
-		{"codex-api-key", "API", "codex", "codex-api-key"}, {"xai-api-key", "API", "xai", "xai-api-key"}, {"claude-api-key", "API", "claude", "claude-api-key"}, {"gemini-api-key", "API", "gemini", "gemini-api-key"}, {"interactions-api-key", "API", "gemini-interactions", "interactions-api-key"}, {"vertex-api-key", "API", "vertex", "vertex"},
-	}
-	for _, sp := range specs {
-		for i, e := range parseTopMapList(lines, sp.Section) {
-			key := scalar(e.Fields["api-key"])
-			base := scalar(e.Fields["base-url"])
-			if key == "" && base == "" {
-				continue
-			}
-			prefix := scalar(e.Fields["prefix"])
-			models := modelsFromNested(e.Nested["models"])
-			idx := ""
-			if sp.Section == "vertex-api-key" {
-				id := stableID("vertex:apikey", key, base, scalar(e.Fields["proxy-url"]))
-				idx = stableAuthIndex("id:" + id)
-			} else {
-				idx = stableAuthIndex(sp.SeedPrefix + ":" + base + "+" + key)
-			}
-			name := strings.ToUpper(strings.TrimSuffix(sp.Section, "-api-key")) + " API"
-			if len(models) > 0 {
-				name += " · " + models[0]
-			}
-			rid := fmt.Sprintf("api:%s:%s:%d", sp.Provider, idx, i)
-			resources = append(resources, apiResource{ID: rid, Kind: "API", Provider: sp.Provider, DisplayName: name, AuthIndex: idx, Prefix: prefix, BaseURL: base, KeyHint: maskKey(key), Status: "active", Models: models, SuggestedModel: suggestedModel(prefix, models)})
-		}
-	}
-	for i, e := range parseTopMapList(lines, "openai-compatibility") {
-		if parseBool(scalar(e.Fields["disabled"]), false) {
-			continue
-		}
-		name := scalar(e.Fields["name"])
-		provider := openAICompatibleProviderKey(name)
-		base := scalar(e.Fields["base-url"])
-		prefix := scalar(e.Fields["prefix"])
-		models := modelsFromNested(e.Nested["models"])
-		entries := e.Nested["api-key-entries"]
-		if len(entries) == 0 {
-			entries = []yamlMapEntry{{Fields: map[string]string{}}}
-		}
-		for j, kent := range entries {
-			key := scalar(kent.Fields["api-key"])
-			idx := ""
-			if key != "" {
-				idx = stableAuthIndex("openai-compatibility:" + base + "+" + key)
-			} else {
-				id := stableID("openai-compatibility:"+strings.ToLower(strings.TrimSpace(name)), base)
-				idx = stableAuthIndex("id:" + id)
-			}
-			display := name
-			if display == "" {
-				display = "OpenAI Compatibility"
-			}
-			rid := fmt.Sprintf("api:%s:%s:%d:%d", provider, idx, i, j)
-			resources = append(resources, apiResource{ID: rid, Kind: "API", Provider: provider, DisplayName: display, AuthIndex: idx, Prefix: prefix, BaseURL: base, KeyHint: maskKey(key), Status: "active", Models: models, SuggestedModel: suggestedModel(prefix, models)})
-		}
-	}
-	return dks, resources
+	inv, _ := readCPAConfigInventory(raw)
+	return inv.visible()
 }
 
 func suggestedModel(prefix string, models []string) string {
@@ -1536,117 +1477,6 @@ func stableAuthIndex(seed string) string {
 	return hex.EncodeToString(s[:8])
 }
 
-type yamlLine struct {
-	Indent int
-	Text   string
-}
-type yamlMapEntry struct {
-	Fields map[string]string
-	Nested map[string][]yamlMapEntry
-}
-
-func preprocessYAMLLines(raw string) []yamlLine {
-	out := []yamlLine{}
-	for _, ln := range strings.Split(raw, "\n") {
-		clean := stripYAMLComment(ln)
-		if strings.TrimSpace(clean) == "" {
-			continue
-		}
-		indent := len(clean) - len(strings.TrimLeft(clean, " "))
-		out = append(out, yamlLine{Indent: indent, Text: strings.TrimSpace(clean)})
-	}
-	return out
-}
-func parseTopStringList(lines []yamlLine, section string) []string {
-	start, end := sectionBounds(lines, section)
-	if start < 0 {
-		return nil
-	}
-	out := []string{}
-	for _, l := range lines[start:end] {
-		if l.Indent == 2 && strings.HasPrefix(l.Text, "- ") {
-			v := unquoteYAML(strings.TrimSpace(strings.TrimPrefix(l.Text, "- ")))
-			if v != "" {
-				out = append(out, v)
-			}
-		}
-	}
-	return out
-}
-func sectionBounds(lines []yamlLine, section string) (int, int) {
-	needle := section + ":"
-	for i, l := range lines {
-		if l.Indent == 0 && strings.HasPrefix(l.Text, needle) {
-			end := len(lines)
-			for j := i + 1; j < len(lines); j++ {
-				if lines[j].Indent == 0 {
-					end = j
-					break
-				}
-			}
-			return i + 1, end
-		}
-	}
-	return -1, -1
-}
-func parseTopMapList(lines []yamlLine, section string) []yamlMapEntry {
-	start, end := sectionBounds(lines, section)
-	if start < 0 {
-		return nil
-	}
-	block := lines[start:end]
-	return parseMapListAt(block, 2)
-}
-func parseMapListAt(lines []yamlLine, indent int) []yamlMapEntry {
-	out := []yamlMapEntry{}
-	for i := 0; i < len(lines); {
-		l := lines[i]
-		if l.Indent != indent || !strings.HasPrefix(l.Text, "-") {
-			i++
-			continue
-		}
-		e := yamlMapEntry{Fields: map[string]string{}, Nested: map[string][]yamlMapEntry{}}
-		rest := strings.TrimSpace(strings.TrimPrefix(l.Text, "-"))
-		if k, v, ok := splitYAMLKeyValue(rest); ok {
-			e.Fields[k] = v
-		}
-		i++
-		for i < len(lines) && lines[i].Indent > indent {
-			cur := lines[i]
-			if cur.Indent == indent+2 {
-				if k, v, ok := splitYAMLKeyValue(cur.Text); ok {
-					if strings.TrimSpace(v) == "" {
-						j := i + 1
-						for j < len(lines) && lines[j].Indent > cur.Indent {
-							j++
-						}
-						e.Nested[k] = parseMapListAt(lines[i+1:j], cur.Indent+2)
-						i = j
-						continue
-					} else {
-						e.Fields[k] = v
-					}
-				}
-			}
-			i++
-		}
-		out = append(out, e)
-	}
-	return out
-}
-func modelsFromNested(entries []yamlMapEntry) []string {
-	out := []string{}
-	for _, e := range entries {
-		a := scalar(e.Fields["alias"])
-		n := scalar(e.Fields["name"])
-		if a != "" {
-			out = append(out, a)
-		} else if n != "" {
-			out = append(out, n)
-		}
-	}
-	return out
-}
 func stripYAMLComment(s string) string {
 	sq, dq := false, false
 	for i, r := range s {
