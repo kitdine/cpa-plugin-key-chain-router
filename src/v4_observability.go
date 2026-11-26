@@ -103,7 +103,9 @@ func enrichRoutingSelectionReasonsV6(ev *RoutingEvent) {
 	reasons := make([]string, len(ev.Attempts))
 	for i := range ev.Attempts {
 		base := ""
-		if i == 0 {
+		if i+1 == ev.sameCandidateRetryAt {
+			base = "CPA 确认请求未发出，切换前重试原候选一次"
+		} else if i == 0 {
 			base = initialSelectionReasonV6(rule, ev.Attempts[i])
 		} else {
 			base = failoverSelectionReasonV6(ev, rule, i)

@@ -18,6 +18,7 @@ func runNonStreamPolicyV4(trace string, p *Policy, r *PolicyRule, ranked []*Poli
 	var lastErr error
 	max := r.Failover.MaxAttempts
 	if max <= 0 { max = len(ranked) + 1 }
+	retry := candidateRetryV4{enabled: r.Failover.RetryBeforeSwitch}
 	for len(event.Attempts) < max {
 		c, probe, healthSkips := nextHealthyCandidateWithSkipsV4(p, r, ranked, attempted, nextAction, currentPriority)
 		nextAction = failNext
@@ -25,8 +26,9 @@ func runNonStreamPolicyV4(trace string, p *Policy, r *PolicyRule, ranked []*Poli
 		event.healthSkips = append(event.healthSkips, healthSkips)
 		attempted[c.ID] = true
 		currentPriority = c.Priority
-		resp, ar, err := executeCandidateV4(c, source, clientModel, body, headers, query, alt, callbackID, false)
-		event.Attempts = append(event.Attempts, ar)
+		resp, ar, err := retry.execute(&event, p, r, c, probe, max, func() (hostModelExecutionResponse, attemptResult, error) {
+			return executeCandidateV4(c, source, clientModel, body, headers, query, alt, callbackID, false)
+		})
 		if err == nil && resp.StatusCode >= 200 && resp.StatusCode < 400 {
 			recordCandidateSuccessV4(p, r, c, probe)
 			event.Final, event.Provider, event.AuthIndex = c.Name, c.Provider, c.AuthIndex

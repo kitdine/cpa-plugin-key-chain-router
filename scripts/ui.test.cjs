@@ -451,3 +451,12 @@ test('keyboard candidate movement follows the same candidate and chooses an enab
   h.run('toggleCandidate(0,1)');
   assert.deepEqual(focused, ['moved','toggled']);
 });
+
+test('failover retry is opt-in and retains its setting on rerender', () => {
+  const h = ready();
+  h.run('renderRules()');
+  assert.match(h.node('rules').innerHTML, /id="retry-before-switch-0" type="checkbox" style="[^"]*" +onchange=/);
+  h.run('EDIT.rules[0].failover.retry_before_switch=true; renderRules()');
+  assert.match(h.node('rules').innerHTML, /id="retry-before-switch-0" type="checkbox" style="[^"]*" checked onchange=/);
+  assert.equal(h.read('EDIT.rules[0].failover.retry_before_switch'), true);
+});

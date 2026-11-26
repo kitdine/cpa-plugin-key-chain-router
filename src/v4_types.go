@@ -89,6 +89,7 @@ type FailoverPolicy struct {
 	Other        string `json:"other"`
 	Exhausted    string `json:"exhausted"`
 	MaxAttempts  int    `json:"max_attempts"`
+	RetryBeforeSwitch bool `json:"retry_before_switch,omitempty"`
 }
 
 type ObservabilityConfig struct {
@@ -127,6 +128,7 @@ type RoutingEvent struct {
 	Error            string          `json:"error,omitempty"`
 	ruleSnapshot     *PolicyRule
 	healthSkips      [][]string
+	sameCandidateRetryAt int // 1-based position in Attempts, zero if absent
 }
 
 type sqliteSink struct {
